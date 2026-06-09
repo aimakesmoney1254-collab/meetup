@@ -1,0 +1,1959 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MeetUp</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #020817; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    input, button, textarea { font-family: inherit; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+// ─── SUPABASE REST CLIENT (no external library) ──────────────────────────────
+const SUPABASE_URL = "https://mqtvptumpsbxyzeuvvjn.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1xdHZwdHVtcHNieHl6ZXV2dmpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5OTExMTksImV4cCI6MjA5NjU2NzExOX0.9clqFQPtsg9sHd1AzsvCaVzB_UqMnt6rHoyq1w3BW1E";
+const LS_KEY = "meetup_session";
+
+// ── in-memory state ──
+let _accessToken = null;
+let _currentUser = null;
+let _authListeners = [];
+
+function _notifyListeners(user) { _authListeners.forEach(fn => fn(user)); }
+
+// Try to restore a "remember me" session from localStorage
+function _restoreSession() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return false;
+    const { access_token, user } = JSON.parse(raw);
+    if (access_token && user) { _accessToken = access_token; _currentUser = user; return true; }
+  } catch {}
+  return false;
+}
+
+function _saveSession(token, user) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ access_token: token, user })); } catch {}
+}
+
+function _clearSession() {
+  try { localStorage.removeItem(LS_KEY); } catch {}
+}
+
+// Restore on module load
+_restoreSession();
+
+const supabase = {
+  auth: {
+    getSession: async () => {
+      if (_currentUser) return { data: { session: { user: _currentUser } } };
+      return { data: { session: null } };
+    },
+    onAuthStateChange: (callback) => {
+      _authListeners.push(callback);
+      callback("INITIAL", _currentUser ? { user: _currentUser } : null);
+      return { data: { subscription: { unsubscribe: () => { _authListeners = _authListeners.filter(fn => fn !== callback); } } } };
+    },
+    signInWithPassword: async ({ email, password, rememberMe = false }) => {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) return { data: null, error: { message: data.error_description || data.msg || "אימייל או סיסמה שגויים" } };
+      _accessToken = data.access_token;
+      _currentUser = data.user;
+      if (rememberMe) _saveSession(data.access_token, data.user);
+      _notifyListeners(_currentUser);
+      return { data: { user: data.user }, error: null };
+    },
+    signUp: async ({ email, password }) => {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) return { data: null, error: { message: data.error_description || data.msg || "שגיאה בהרשמה" } };
+      // With email confirmation ON: data.user exists but no access_token yet — that's expected
+      return { data: { user: data.user }, error: null };
+    },
+    resetPasswordForEmail: async (email) => {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY },
+        body: JSON.stringify({ email }),
+      });
+      if (!res.ok) { const d = await res.json(); return { error: { message: d.error_description || "שגיאה בשליחת מייל" } }; }
+      return { error: null };
+    },
+    signOut: async () => {
+      if (_accessToken) {
+        await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${_accessToken}`, "apikey": SUPABASE_ANON_KEY },
+        }).catch(() => {});
+      }
+      _accessToken = null; _currentUser = null;
+      _clearSession();
+      _notifyListeners(null);
+      return { error: null };
+    },
+  },
+  from: (table) => ({
+    select: (cols = "*") => ({
+      eq: (col, val) => ({
+        single: async () => {
+          const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=${cols}&${col}=eq.${val}&limit=1`, {
+            headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${_accessToken || SUPABASE_ANON_KEY}` },
+          });
+          const arr = await res.json();
+          return { data: Array.isArray(arr) ? arr[0] || null : null, error: res.ok ? null : arr };
+        },
+      }),
+    }),
+    upsert: async (row) => {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY,
+          "Authorization": `Bearer ${_accessToken || SUPABASE_ANON_KEY}`,
+          "Prefer": "resolution=merge-duplicates",
+        },
+        body: JSON.stringify(row),
+      });
+      return { error: res.ok ? null : await res.json() };
+    },
+  }),
+};
+
+// ─── AUTH SCREEN ─────────────────────────────────────────────────────────────
+function AuthScreen({ onAuth }) {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [rememberMe, setRememberMe] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [forgotSent, setForgotSent] = useState(false);
+
+  const tc = { bg: "#020817", bgCard: "#0f172a", bgInput: "#1e293b", border: "#1e293b", text: "#f1f5f9", textSub: "#64748b", textMuted: "#475569" };
+
+  const handleLogin = async () => {
+    setError(""); setLoading(true);
+    const { data, error: err } = await supabase.auth.signInWithPassword({ email, password, rememberMe });
+    setLoading(false);
+    if (err) { setError(err.message); return; }
+    onAuth(data.user);
+  };
+
+  const handleRegister = async () => {
+    setError(""); setLoading(true);
+    if (!fullName.trim()) { setError("נא להכניס שם מלא"); setLoading(false); return; }
+    if (password.length < 6) { setError("הסיסמה חייבת להכיל לפחות 6 תווים"); setLoading(false); return; }
+    try {
+      const { data, error: err } = await supabase.auth.signUp({ email, password });
+      console.log("signUp response:", JSON.stringify({ data, error: err }));
+      if (err) {
+        const msg = err.message || "";
+        if (msg.toLowerCase().includes("already") || msg.toLowerCase().includes("registered")) {
+          setError("אימייל זה כבר רשום — נסה להתחבר");
+          setMode("login");
+        } else {
+          setError("err: " + msg);
+        }
+        setLoading(false); return;
+      }
+      // Supabase bug: when email already exists it returns a user with empty identities array
+      if (!data?.user?.id || (Array.isArray(data.user.identities) && data.user.identities.length === 0)) {
+        setError("אימייל זה כבר רשום — נסה להתחבר");
+        setMode("login");
+        setLoading(false); return;
+      }
+      // Save profile
+      await supabase.from("profiles").upsert({ id: data.user.id, full_name: fullName.trim(), email });
+      // Auto login
+      const { data: loginData, error: loginErr } = await supabase.auth.signInWithPassword({ email, password, rememberMe });
+      setLoading(false);
+      if (loginErr) { setError("נרשמת בהצלחה! כעת התחבר."); setMode("login"); return; }
+      onAuth(loginData.user);
+    } catch (e) {
+      setLoading(false);
+      setError("catch: " + (e?.message || String(e)));
+    }
+  };
+
+  const handleForgot = async () => {
+    setError(""); setLoading(true);
+    const { error: err } = await supabase.auth.resetPasswordForEmail(email);
+    setLoading(false);
+    if (err) { setError(err.message); return; }
+    setForgotSent(true);
+  };
+
+  const inputStyle = {
+    flex: 1, padding: "13px 16px", background: tc.bgInput, border: `1px solid ${tc.border}`,
+    borderRadius: 12, color: tc.text, fontSize: 15, direction: "ltr", boxSizing: "border-box", outline: "none",
+  };
+  const btnPrimary = (active) => ({
+    width: "100%", padding: "14px", marginTop: 8, border: "none", borderRadius: 12, fontWeight: 700, fontSize: 15,
+    cursor: active ? "pointer" : "not-allowed",
+    background: active ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : tc.bgInput,
+    color: active ? "#fff" : tc.textSub,
+  });
+
+  if (forgotSent) return (
+    <div style={{ minHeight: "100vh", background: tc.bg, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "'Segoe UI', sans-serif" }}>
+      <div style={{ width: "100%", maxWidth: 380, background: tc.bgCard, borderRadius: 20, border: `1px solid ${tc.border}`, padding: "40px 28px", textAlign: "center", direction: "rtl" }}>
+        <div style={{ fontSize: 52, marginBottom: 16 }}>🔑</div>
+        <div style={{ color: "#f1f5f9", fontWeight: 800, fontSize: 20, marginBottom: 10 }}>נשלח!</div>
+        <div style={{ color: tc.textSub, fontSize: 14, lineHeight: 1.7, marginBottom: 24 }}>
+          קישור לאיפוס סיסמה נשלח לכתובת<br />
+          <span style={{ color: "#60a5fa", fontWeight: 600 }}>{email}</span>
+        </div>
+        <button onClick={() => { setForgotSent(false); setMode("login"); }} style={{ ...btnPrimary(true), marginTop: 0 }}>
+          ← חזרה לכניסה
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: tc.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px", fontFamily: "'Segoe UI', Tahoma, sans-serif" }}>
+      <div style={{ marginBottom: 32, textAlign: "center" }}>
+        <div style={{ color: "#3b82f6", fontWeight: 900, fontSize: 38, letterSpacing: 2 }}>MeetUp</div>
+        <div style={{ color: tc.textSub, fontSize: 13, marginTop: 6 }}>{mode === "forgot" ? "איפוס סיסמה" : "ברוך הבא"}</div>
+      </div>
+
+      <div style={{ width: "100%", maxWidth: 380, background: tc.bgCard, borderRadius: 20, border: `1px solid ${tc.border}`, padding: "28px 24px", boxShadow: "0 8px 40px rgba(0,0,0,0.5)", direction: "rtl" }}>
+        {mode !== "forgot" && (
+          <div style={{ display: "flex", gap: 4, marginBottom: 24, background: tc.bgInput, borderRadius: 12, padding: 4 }}>
+            {[["login","כניסה"],["register","הרשמה"]].map(([m, label]) => (
+              <button key={m} onClick={() => { setMode(m); setError(""); setShowPassword(false); }}
+                style={{ flex: 1, padding: "10px", borderRadius: 9, border: "none", fontWeight: 700, fontSize: 14, cursor: "pointer",
+                  background: mode === m ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : "transparent",
+                  color: mode === m ? "#fff" : tc.textSub }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {error && (
+          <div style={{ background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 10, padding: "11px 14px", marginBottom: 16, color: "#ef4444", fontSize: 13, textAlign: "center" }}>
+            ⚠️ {error}
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {mode === "register" && (
+            <div>
+              <label style={{ color: tc.textSub, fontSize: 12, display: "block", marginBottom: 5 }}>שם מלא</label>
+              <input value={fullName} onChange={e => setFullName(e.target.value)} placeholder="ישראל ישראלי"
+                style={{ ...inputStyle, width: "100%", direction: "rtl" }} />
+            </div>
+          )}
+
+          <div>
+            <label style={{ color: tc.textSub, fontSize: 12, display: "block", marginBottom: 5 }}>אימייל</label>
+            <input value={email} onChange={e => setEmail(e.target.value)} type="email" placeholder="you@example.com"
+              style={{ ...inputStyle, width: "100%" }} />
+          </div>
+
+          {mode !== "forgot" && (
+            <div>
+              <label style={{ color: tc.textSub, fontSize: 12, display: "block", marginBottom: 5 }}>סיסמה</label>
+              <div style={{ display: "flex", gap: 0, background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 12, overflow: "hidden" }}>
+                <input value={password} onChange={e => setPassword(e.target.value)}
+                  type={showPassword ? "text" : "password"} placeholder="••••••••"
+                  style={{ ...inputStyle, border: "none", borderRadius: 0, background: "transparent" }}
+                  onKeyDown={e => e.key === "Enter" && mode === "login" && handleLogin()} />
+                <button onClick={() => setShowPassword(v => !v)}
+                  style={{ padding: "0 14px", background: "transparent", border: "none", cursor: "pointer", color: tc.textSub, fontSize: 16, flexShrink: 0 }}>
+                  {showPassword ? "🙈" : "👁️"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {mode === "login" && (
+            <div onClick={() => setRememberMe(v => !v)}
+              style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none" }}>
+              <div style={{ width: 20, height: 20, borderRadius: 6, border: `2px solid ${rememberMe ? "#3b82f6" : tc.border}`,
+                background: rememberMe ? "#3b82f6" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all 0.15s" }}>
+                {rememberMe && <span style={{ color: "#fff", fontSize: 13, lineHeight: 1 }}>✓</span>}
+              </div>
+              <span style={{ color: tc.textSub, fontSize: 13 }}>זכור אותי</span>
+            </div>
+          )}
+
+          {mode === "login" && <button onClick={handleLogin} disabled={loading || !email || !password} style={btnPrimary(!loading && email && password)}>{loading ? "מתחבר..." : "כניסה"}</button>}
+          {mode === "register" && <button onClick={handleRegister} disabled={loading || !email || !password || !fullName} style={btnPrimary(!loading && email && password && fullName)}>{loading ? "נרשם..." : "הירשם"}</button>}
+          {mode === "forgot" && <button onClick={handleForgot} disabled={loading || !email} style={btnPrimary(!loading && email)}>{loading ? "שולח..." : "שלח קישור איפוס"}</button>}
+        </div>
+
+        <div style={{ marginTop: 18, textAlign: "center" }}>
+          {mode === "login" && <button onClick={() => { setMode("forgot"); setError(""); }} style={{ background: "none", border: "none", color: "#60a5fa", fontSize: 13, cursor: "pointer" }}>שכחתי סיסמה</button>}
+          {mode === "forgot" && <button onClick={() => { setMode("login"); setError(""); }} style={{ background: "none", border: "none", color: "#60a5fa", fontSize: 13, cursor: "pointer" }}>← חזרה לכניסה</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── DATA ────────────────────────────────────────────────────────────────────
+const MEETING_TYPES_DATA = [
+  { id: "football", labels: { "עברית": "כדורגל", "English": "Football", "العربية": "كرة القدم" }, icon: "⚽" },
+  { id: "basketball", labels: { "עברית": "כדורסל", "English": "Basketball", "العربية": "كرة السلة" }, icon: "🏀" },
+  { id: "tennis", labels: { "עברית": "טניס", "English": "Tennis", "العربية": "تنس" }, icon: "🎾" },
+  { id: "pingpong", labels: { "עברית": "פינג פונג", "English": "Ping Pong", "العربية": "بينغ بونغ" }, icon: "🏓" },
+  { id: "padel", labels: { "עברית": "פאדל", "English": "Padel", "العربية": "بادل" }, icon: "🎾" },
+  { id: "cafe", labels: { "עברית": "בית קפה", "English": "Café", "العربية": "مقهى" }, icon: "☕" },
+  { id: "poker", labels: { "עברית": "ערב פוקר", "English": "Poker Night", "العربية": "ليلة البوكر" }, icon: "🃏" },
+  { id: "watch", labels: { "עברית": "צפייה במשחק", "English": "Watch a Game", "العربية": "مشاهدة مباراة" }, icon: "📺" },
+  { id: "mall", labels: { "עברית": "קניון", "English": "Mall", "العربية": "مركز تسوق" }, icon: "🛍️" },
+  { id: "restaurant", labels: { "עברית": "מסעדה", "English": "Restaurant", "العربية": "مطعم" }, icon: "🍽️" },
+  { id: "boardgames", labels: { "עברית": "ערב משחקים", "English": "Board Games", "العربية": "ألعاب لوحية" }, icon: "🎲" },
+  { id: "gym", labels: { "עברית": "חדר כושר", "English": "Gym", "العربية": "صالة رياضية" }, icon: "💪" },
+  { id: "calisthenics", labels: { "עברית": "קליסטניקס", "English": "Calisthenics", "العربية": "تمارين الوزن" }, icon: "🤸" },
+  { id: "other", labels: { "עברית": "אחר", "English": "Other", "العربية": "أخرى" }, icon: "➕" },
+];
+
+function getMeetingTypes(language) {
+  return MEETING_TYPES_DATA.map(mt => ({
+    ...mt,
+    label: mt.labels[language] || mt.labels["עברית"],
+  }));
+}
+
+// Keep backward compat for static references
+const MEETING_TYPES = getMeetingTypes("עברית");
+
+const FRIENDS = [
+  { id: 1, name: "יוסי כהן", initial: "י", meetings: 14, cancelled: 1, mutualMeetings: 8, sports: ["כדורגל", "כדורסל"] },
+  { id: 2, name: "מיכל לוי", initial: "מ", meetings: 11, cancelled: 3, mutualMeetings: 5, sports: ["טניס", "בית קפה"] },
+  { id: 3, name: "דני אברהם", initial: "ד", meetings: 12, cancelled: 2, mutualMeetings: 7, sports: ["כדורגל", "פינג פונג"] },
+  { id: 4, name: "שירה מזרחי", initial: "ש", meetings: 15, cancelled: 0, mutualMeetings: 9, sports: ["בית קפה", "מסעדה"] },
+  { id: 5, name: "עמית גולן", initial: "ע", meetings: 10, cancelled: 5, mutualMeetings: 4, sports: ["חדר כושר", "קליסטניקס"] },
+];
+
+const GROUPS = [
+  { id: 1, name: "קבוצת כדורגל", members: [1, 2, 3] },
+  { id: 2, name: "חברי ילדות", members: [4, 5, 1] },
+];
+
+const MY_MEETINGS = [
+  { id: 1, typeId: "football", icon: "⚽", date: "15.06.2026", time: "18:00", location: "מגרש גורדון", invitees: ["יוסי כהן", "דני אברהם"], status: "confirmed" },
+  { id: 2, typeId: "cafe", icon: "☕", date: "20.06.2026", time: "10:30", location: "קפה נמרוד", invitees: ["שירה מזרחי"], status: "confirmed" },
+];
+
+const INVITED_MEETINGS = [
+  { id: 3, typeId: "poker", icon: "🃏", date: "18.06.2026", time: "21:00", location: "אצל עמית", organizer: "עמית גולן", status: "pending" },
+  { id: 4, typeId: "gym", icon: "💪", date: "12.06.2026", time: "07:00", location: "Holmes Place", organizer: "מיכל לוי", status: "accepted" },
+];
+
+const STATS = [
+  { friend: "שירה מזרחי", initial: "ש", attended: 12, total: 12, cancelled: 0 },
+  { friend: "דני אברהם", initial: "ד", attended: 10, total: 12, cancelled: 2 },
+  { friend: "יוסי כהן", initial: "י", attended: 9, total: 12, cancelled: 3 },
+  { friend: "מיכל לוי", initial: "מ", attended: 7, total: 12, cancelled: 5 },
+  { friend: "עמית גולן", initial: "ע", attended: 5, total: 12, cancelled: 7 },
+];
+
+const BUSINESSES = [
+  {
+    id: 1, name: "דני כץ", title: "מורה פרטי לחשבון", initial: "ד",
+    category: "חינוך", rating: 4.8, reviews: 24, reliability: 94,
+    price: 180, location: "תל אביב", bio: "מורה לחשבון עם 8 שנות ניסיון. מתמחה בהכנה לבגרות ולבחינות קבלה לאוניברסיטאות.",
+    lookingForStudents: false,
+    schedule: {
+      "ראשון": ["09:00", "10:00", "14:00", "15:00", "16:00"],
+      "שני": ["09:00", "10:00", "11:00"],
+      "שלישי": ["14:00", "15:00", "16:00", "17:00"],
+      "רביעי": [],
+      "חמישי": ["09:00", "10:00", "14:00"],
+    },
+    bookedSlots: { "ראשון": ["10:00"], "שני": ["09:00", "11:00"], "שלישי": ["15:00"], "חמישי": [] },
+    reviews_list: [
+      { author: "רון מ.", stars: 5, text: "מורה מעולה, הסביר בצורה ברורה מאוד. ממליץ בחום!" },
+      { author: "נועה ש.", stars: 5, text: "עזר לי להבין חומר שלא הצלחתי לתפוס שנים." },
+      { author: "עמית ג.", stars: 4, text: "טוב מאוד, סבלני ומקצועי." },
+    ],
+  },
+  {
+    id: 2, name: "ליאור שמיר", title: "מאמן כושר אישי", initial: "ל",
+    category: "ספורט", rating: 4.5, reviews: 18, reliability: 88,
+    price: 220, location: "הרצליה", bio: "מאמן כושר מוסמך עם התמחות בכושר פונקציונלי ועיצוב הגוף.",
+    lookingForStudents: true,
+    schedule: {
+      "ראשון": ["06:00", "07:00", "17:00", "18:00"],
+      "שני": ["06:00", "07:00", "08:00"],
+      "שלישי": ["17:00", "18:00", "19:00"],
+      "רביעי": ["06:00", "07:00"],
+      "חמישי": ["17:00", "18:00"],
+    },
+    bookedSlots: { "ראשון": ["07:00"], "שני": ["06:00"], "שלישי": ["18:00"], "רביעי": [], "חמישי": [] },
+    reviews_list: [
+      { author: "גיל ר.", stars: 5, text: "שינה לי את החיים! תוכנית אימונים מותאמת אישית." },
+      { author: "אורית כ.", stars: 4, text: "מקצועי ומוטיבציוני." },
+    ],
+  },
+];
+
+const FRIEND_CHAT_MESSAGES = {
+  1: [
+    { from: "them", text: "היי! מה קורה?" },
+    { from: "me", text: "הכל טוב! מה אתה אומר על כדורגל השבוע?" },
+    { from: "them", text: "בטח! יום שישי בערב?" },
+  ],
+  2: [{ from: "them", text: "מתי נקבע טניס?" }],
+  3: [], 4: [], 5: [],
+};
+
+const BUSINESS_CHAT_MESSAGES = {
+  1: [
+    { from: "them", text: "שלום! במה אוכל לעזור?" },
+    { from: "me", text: "שלום, אני מעוניין בשיעורי חשבון" },
+    { from: "them", text: "כמובן! מה הרמה שלך?" },
+  ],
+  2: [],
+};
+
+// ─── TRANSLATIONS ─────────────────────────────────────────────────────────────
+const TRANSLATIONS = {
+  "עברית": {
+    appName: "MeetUp", home: "דף הבית", createMeeting: "יצירת פגישה", myMeetings: "הפגישות שלי",
+    friends: "חברים", stats: "סטטיסטיקות", business: "עסקים", settings: "הגדרות",
+    hello: "שלום,", profile: "הפרופיל שלי", editProfile: "✏️ ערוך פרופיל",
+    save: "💾 שמור", cancel: "ביטול", fullName: "שם מלא", email: "אימייל",
+    settingsTitle: "הגדרות", notifications: "התראות", active: "פעיל", off: "כבוי",
+    calendarBackup: "גיבוי ליומן", privacy: "פרטיות", theme: "נושא", language: "שפה",
+    everyone: "כולם", friendsOnly: "חברים בלבד", onlyMe: "אני בלבד",
+    dark: "כהה", light: "בהיר", auto: "אוטומטי",
+    accountMgmt: "ניהול חשבון", changePassword: "🔑 שינוי סיסמה",
+    connectedDevices: "📱 מכשירים מחוברים", logout: "🚪 התנתק",
+    clickToChange: "החלף תמונה", manageProfile: "ניהול פרופיל",
+    // meetings
+    meetings: "פגישות", myMeetingsList: "הפגישות שלי", invited: "הוזמנתי",
+    confirmed: "אושר", accepted: "אישרתי", pending: "ממתין",
+    createdBy: "נוצר ע״י", confirm: "✅ אשר", reject: "❌ דחה", addCalendar: "📆 ביומן",
+    // home
+    createNewMeeting: "יצירת פגישה חדשה", bookNow: "קבע עם חברים עכשיו", all: "הכל",
+    // friends
+    mutualMeetings: "פגישות משותפות", attendance: "נוכחות",
+    // stats
+    statsTitle: "סטטיסטיקות", statsSubtitle: "דירוג חברים לפי נוכחות",
+    // profile stats
+    meetingsCreated: "פגישות שיצרתי", meetingsAttended: "פגישות שהשתתפתי",
+    friendsCount: "חברים", cancellations: "ביטולים",
+    // account modals
+    changePasswordTitle: "שינוי סיסמה", currentPassword: "סיסמה נוכחית",
+    newPassword: "סיסמה חדשה", confirmPassword: "אימות סיסמה", update: "עדכן",
+    devicesTitle: "מכשירים מחוברים", thisDevice: "מכשיר זה (נוכחי)", removeDevice: "הסר",
+    logoutConfirm: "האם אתה בטוח שברצונך להתנתק?", yes: "כן, התנתק", no: "לא",
+    removePhoto: "הסר תמונה",
+    // create meeting
+    createMeetingTitle: "יצירת פגישה", chooseType: "בחר סוג פגישה", dateTime: "תאריך ושעה עבור",
+    dateLabel: "תאריך", timeLabel: "שעה", chooseLocation: "בחירת מיקום",
+    enterLocation: "הכנס מיקום...", confirmLocation: "אישור מיקום", locationChosen: "המיקום שנבחר",
+    chooseFriends: "בחירת חברים וקבוצות", groupsLabel: "קבוצות", friendsLabel: "חברים",
+    sendFriends: "📨 שלח לחברים", meetingSent: "הפגישה נשלחה!", savedCalendar: "נשמרה ביומן ונשלחה לחברים",
+    newMeeting: "פגישה חדשה", back: "← חזרה", next: "המשך ←",
+    typeStep: "סוג", dateStep: "תאריך", locationStep: "מיקום", friendsStep: "חברים",
+    enterMeetingName: "הכנס שם פגישה...", members: "חברים",
+  },
+  "English": {
+    appName: "MeetUp", home: "Home", createMeeting: "Create Meeting", myMeetings: "My Meetings",
+    friends: "Friends", stats: "Statistics", business: "Business", settings: "Settings",
+    hello: "Hello,", profile: "My Profile", editProfile: "✏️ Edit Profile",
+    save: "💾 Save", cancel: "Cancel", fullName: "Full Name", email: "Email",
+    settingsTitle: "Settings", notifications: "Notifications", active: "Active", off: "Off",
+    calendarBackup: "Calendar Sync", privacy: "Privacy", theme: "Theme", language: "Language",
+    everyone: "Everyone", friendsOnly: "Friends Only", onlyMe: "Only Me",
+    dark: "Dark", light: "Light", auto: "Auto",
+    accountMgmt: "Account Management", changePassword: "🔑 Change Password",
+    connectedDevices: "📱 Connected Devices", logout: "🚪 Logout",
+    clickToChange: "Change Photo", manageProfile: "Manage Profile",
+    // meetings
+    meetings: "Meetings", myMeetingsList: "My Meetings", invited: "Invited",
+    confirmed: "Confirmed", accepted: "Accepted", pending: "Pending",
+    createdBy: "Created by", confirm: "✅ Confirm", reject: "❌ Decline", addCalendar: "📆 Calendar",
+    // home
+    createNewMeeting: "Create New Meeting", bookNow: "Schedule with friends now", all: "All",
+    // friends
+    mutualMeetings: "mutual meetings", attendance: "Attendance",
+    // stats
+    statsTitle: "Statistics", statsSubtitle: "Friends ranked by attendance",
+    // profile stats
+    meetingsCreated: "Meetings Created", meetingsAttended: "Meetings Attended",
+    friendsCount: "Friends", cancellations: "Cancellations",
+    // account modals
+    changePasswordTitle: "Change Password", currentPassword: "Current Password",
+    newPassword: "New Password", confirmPassword: "Confirm Password", update: "Update",
+    devicesTitle: "Connected Devices", thisDevice: "This Device (current)", removeDevice: "Remove",
+    logoutConfirm: "Are you sure you want to logout?", yes: "Yes, Logout", no: "No",
+    removePhoto: "Remove Photo",
+    // create meeting
+    createMeetingTitle: "Create Meeting", chooseType: "Choose meeting type", dateTime: "Date & time for",
+    dateLabel: "Date", timeLabel: "Time", chooseLocation: "Choose Location",
+    enterLocation: "Enter location...", confirmLocation: "Confirm Location", locationChosen: "Chosen location",
+    chooseFriends: "Choose Friends & Groups", groupsLabel: "Groups", friendsLabel: "Friends",
+    sendFriends: "📨 Send to Friends", meetingSent: "Meeting Sent!", savedCalendar: "Saved to calendar and sent to friends",
+    newMeeting: "New Meeting", back: "Back →", next: "Continue →",
+    typeStep: "Type", dateStep: "Date", locationStep: "Location", friendsStep: "Friends",
+    enterMeetingName: "Enter meeting name...", members: "members",
+  },
+  "العربية": {
+    appName: "MeetUp", home: "الرئيسية", createMeeting: "إنشاء اجتماع", myMeetings: "اجتماعاتي",
+    friends: "الأصدقاء", stats: "الإحصائيات", business: "الأعمال", settings: "الإعدادات",
+    hello: "مرحباً،", profile: "ملفي الشخصي", editProfile: "✏️ تعديل الملف",
+    save: "💾 حفظ", cancel: "إلغاء", fullName: "الاسم الكامل", email: "البريد الإلكتروني",
+    settingsTitle: "الإعدادات", notifications: "الإشعارات", active: "نشط", off: "معطل",
+    calendarBackup: "مزامنة التقويم", privacy: "الخصوصية", theme: "المظهر", language: "اللغة",
+    everyone: "الجميع", friendsOnly: "الأصدقاء فقط", onlyMe: "أنا فقط",
+    dark: "داكن", light: "فاتح", auto: "تلقائي",
+    accountMgmt: "إدارة الحساب", changePassword: "🔑 تغيير كلمة المرور",
+    connectedDevices: "📱 الأجهزة المتصلة", logout: "🚪 تسجيل الخروج",
+    clickToChange: "انقر لتغيير الصورة", manageProfile: "إدارة الملف",
+    // meetings
+    meetings: "الاجتماعات", myMeetingsList: "اجتماعاتي", invited: "مدعو",
+    confirmed: "مؤكد", accepted: "قبلت", pending: "قيد الانتظار",
+    createdBy: "أنشأه", confirm: "✅ قبول", reject: "❌ رفض", addCalendar: "📆 التقويم",
+    // home
+    createNewMeeting: "إنشاء اجتماع جديد", bookNow: "حدد موعداً مع الأصدقاء", all: "الكل",
+    // friends
+    mutualMeetings: "اجتماعات مشتركة", attendance: "الحضور",
+    // stats
+    statsTitle: "الإحصائيات", statsSubtitle: "ترتيب الأصدقاء حسب الحضور",
+    // profile stats
+    meetingsCreated: "الاجتماعات التي أنشأتها", meetingsAttended: "الاجتماعات التي حضرتها",
+    friendsCount: "الأصدقاء", cancellations: "الإلغاءات",
+    // account modals
+    changePasswordTitle: "تغيير كلمة المرور", currentPassword: "كلمة المرور الحالية",
+    newPassword: "كلمة المرور الجديدة", confirmPassword: "تأكيد كلمة المرور", update: "تحديث",
+    devicesTitle: "الأجهزة المتصلة", thisDevice: "هذا الجهاز (الحالي)", removeDevice: "إزالة",
+    logoutConfirm: "هل أنت متأكد من تسجيل الخروج؟", yes: "نعم، تسجيل الخروج", no: "لا",
+    removePhoto: "إزالة الصورة",
+    // create meeting
+    createMeetingTitle: "إنشاء اجتماع", chooseType: "اختر نوع الاجتماع", dateTime: "التاريخ والوقت لـ",
+    dateLabel: "التاريخ", timeLabel: "الوقت", chooseLocation: "اختيار الموقع",
+    enterLocation: "أدخل الموقع...", confirmLocation: "تأكيد الموقع", locationChosen: "الموقع المختار",
+    chooseFriends: "اختيار الأصدقاء والمجموعات", groupsLabel: "المجموعات", friendsLabel: "الأصدقاء",
+    sendFriends: "📨 إرسال للأصدقاء", meetingSent: "تم إرسال الاجتماع!", savedCalendar: "تم الحفظ في التقويم والإرسال للأصدقاء",
+    newMeeting: "اجتماع جديد", back: "→ رجوع", next: "→ متابعة",
+    typeStep: "النوع", dateStep: "التاريخ", locationStep: "الموقع", friendsStep: "الأصدقاء",
+    enterMeetingName: "أدخل اسم الاجتماع...", members: "أعضاء",
+  },
+};
+
+// ─── SHARED COMPONENTS ───────────────────────────────────────────────────────
+function ReliabilityGauge({ percent, size = "md" }) {
+  const color = percent >= 80 ? "#22c55e" : percent >= 60 ? "#f59e0b" : "#ef4444";
+  const r = size === "lg" ? 52 : 36;
+  const sw = size === "lg" ? 12 : 10;
+  const w = r * 2 + sw + 2;
+  const h = r + sw / 2 + 2;
+  const cx = w / 2, cy = r + sw / 2 + 1;
+  const circ = Math.PI * r;
+  const offset = circ - (percent / 100) * circ;
+  const fs = size === "lg" ? 20 : 14;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        <path d={`M ${sw / 2 + 1} ${cy} A ${r} ${r} 0 0 1 ${w - sw / 2 - 1} ${cy}`}
+          fill="none" stroke="#1e293b" strokeWidth={sw} strokeLinecap="round" />
+        <path d={`M ${sw / 2 + 1} ${cy} A ${r} ${r} 0 0 1 ${w - sw / 2 - 1} ${cy}`}
+          fill="none" stroke={color} strokeWidth={sw} strokeLinecap="round"
+          strokeDasharray={circ} strokeDashoffset={offset}
+          style={{ transition: "stroke-dashoffset 0.6s ease" }} />
+      </svg>
+      <span style={{ marginTop: -(sw / 2 + fs * 0.4), fontSize: fs, fontWeight: 800, color }}>{percent}%</span>
+    </div>
+  );
+}
+
+function Avatar({ initial, size = 40, gradient = "linear-gradient(135deg,#3b82f6,#8b5cf6)", photo = null }) {
+  if (photo) return (
+    <div style={{ width: size, height: size, borderRadius: "50%", overflow: "hidden", flexShrink: 0, boxShadow: "0 2px 10px rgba(59,130,246,0.25)" }}>
+      <img src={photo} alt="פרופיל" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+    </div>
+  );
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: "50%", background: gradient,
+      display: "flex", alignItems: "center", justifyContent: "center",
+      color: "#fff", fontWeight: 800, fontSize: size * 0.38, flexShrink: 0,
+      boxShadow: "0 2px 10px rgba(59,130,246,0.25)"
+    }}>{initial}</div>
+  );
+}
+
+function BackButton({ onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      background: "none", border: "none", color: "#60a5fa", cursor: "pointer",
+      fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
+      marginBottom: 20, padding: 0, direction: "rtl"
+    }}>← חזרה</button>
+  );
+}
+
+// ─── CHAT ────────────────────────────────────────────────────────────────────
+function ChatView({ name, initial, messages: initMsgs, onBack, gradient }) {
+  const [msgs, setMsgs] = useState(initMsgs || []);
+  const [input, setInput] = useState("");
+  const send = () => {
+    if (!input.trim()) return;
+    setMsgs(prev => [...prev, { from: "me", text: input.trim() }]);
+    setInput("");
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 140px)", direction: "rtl" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid #1e293b" }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: "#60a5fa", cursor: "pointer", fontSize: 18, padding: 0 }}>←</button>
+        <Avatar initial={initial} size={38} gradient={gradient} />
+        <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 16 }}>{name}</div>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, paddingBottom: 8 }}>
+        {msgs.length === 0 && <div style={{ color: "#334155", textAlign: "center", marginTop: 40, fontSize: 13 }}>אין הודעות עדיין</div>}
+        {msgs.map((m, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: m.from === "me" ? "flex-start" : "flex-end" }}>
+            <div style={{
+              maxWidth: "75%", padding: "10px 14px", borderRadius: m.from === "me" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+              background: m.from === "me" ? "linear-gradient(135deg,#1e40af,#7c3aed)" : "#1e293b",
+              color: "#f1f5f9", fontSize: 14, lineHeight: 1.5,
+            }}>{m.text}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, paddingTop: 12, borderTop: "1px solid #1e293b" }}>
+        <input value={input} onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && send()}
+          placeholder="כתוב הודעה..."
+          style={{ flex: 1, padding: "11px 14px", background: "#1e293b", border: "1px solid #334155", borderRadius: 12, color: "#f1f5f9", fontSize: 14, direction: "rtl" }} />
+        <button onClick={send} style={{ padding: "11px 18px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 12, color: "#fff", fontWeight: 700, cursor: "pointer" }}>שלח</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── APPOINTMENT BOOKING ─────────────────────────────────────────────────────
+function AppointmentBooking({ business, onBack }) {
+  const days = Object.keys(business.schedule);
+  const [selDay, setSelDay] = useState(days[0]);
+  const [selTime, setSelTime] = useState(null);
+  const [booked, setBooked] = useState(false);
+
+  const available = (business.schedule[selDay] || []).filter(
+    t => !(business.bookedSlots[selDay] || []).includes(t)
+  );
+  const taken = (business.bookedSlots[selDay] || []);
+
+  if (booked) return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "50vh", gap: 14, direction: "rtl" }}>
+      <div style={{ fontSize: 56 }}>✅</div>
+      <div style={{ color: "#22c55e", fontWeight: 800, fontSize: 20 }}>התור נקבע!</div>
+      <div style={{ color: "#94a3b8", fontSize: 14 }}>{selDay} בשעה {selTime} עם {business.name}</div>
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "14px 20px", textAlign: "center", maxWidth: 300 }}>
+        <div style={{ color: "#64748b", fontSize: 12, marginBottom: 6 }}>💳 תשלום מאובטח</div>
+        <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 18 }}>₪{business.price}</div>
+        <div style={{ color: "#64748b", fontSize: 11, marginTop: 4 }}>כולל עמלת שירות (3%)</div>
+      </div>
+      <button onClick={onBack} style={{ padding: "12px 28px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 12, color: "#fff", fontWeight: 700, cursor: "pointer" }}>חזרה לפרופיל</button>
+    </div>
+  );
+
+  return (
+    <div style={{ direction: "rtl" }}>
+      <BackButton onClick={onBack} />
+      <h3 style={{ color: "#f1f5f9", fontWeight: 800, fontSize: 18, marginBottom: 6 }}>קביעת תור — {business.name}</h3>
+      <div style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>בחר יום ושעה</div>
+
+      {/* Day selector */}
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", marginBottom: 20, paddingBottom: 4 }}>
+        {days.map(d => (
+          <button key={d} onClick={() => { setSelDay(d); setSelTime(null); }}
+            style={{
+              padding: "8px 16px", borderRadius: 10, border: `2px solid ${selDay === d ? "#3b82f6" : "#1e293b"}`,
+              background: selDay === d ? "#1e3a5f" : "#0f172a", color: selDay === d ? "#60a5fa" : "#64748b",
+              fontWeight: 700, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+            }}>{d}</button>
+        ))}
+      </div>
+
+      {/* Time slots */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ color: "#64748b", fontSize: 12, marginBottom: 10 }}>שעות פנויות</div>
+        {available.length === 0 && <div style={{ color: "#334155", fontSize: 13 }}>אין שעות פנויות ביום זה</div>}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {(business.schedule[selDay] || []).map(t => {
+            const isTaken = taken.includes(t);
+            const isSel = selTime === t;
+            return (
+              <button key={t} disabled={isTaken} onClick={() => setSelTime(isTaken ? null : t)}
+                style={{
+                  padding: "10px 18px", borderRadius: 10, fontWeight: 700, fontSize: 14, cursor: isTaken ? "not-allowed" : "pointer",
+                  border: `2px solid ${isTaken ? "#1e293b" : isSel ? "#22c55e" : "#1e293b"}`,
+                  background: isTaken ? "#0a0f1a" : isSel ? "#14532d" : "#1e293b",
+                  color: isTaken ? "#334155" : isSel ? "#22c55e" : "#94a3b8",
+                  textDecoration: isTaken ? "line-through" : "none",
+                  position: "relative",
+                }}>
+                {t} {isTaken && <span style={{ fontSize: 10, display: "block", color: "#334155" }}>תפוס</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Payment info */}
+      {selTime && (
+        <div style={{ background: "#0f172a", border: "1px solid #1e3a5f", borderRadius: 14, padding: "16px", marginBottom: 16 }}>
+          <div style={{ color: "#94a3b8", fontSize: 13, marginBottom: 8 }}>סיכום תור</div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ color: "#64748b", fontSize: 13 }}>שיעור עם {business.name}</span>
+            <span style={{ color: "#f1f5f9", fontWeight: 700 }}>₪{business.price}</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+            <span style={{ color: "#64748b", fontSize: 12 }}>עמלת שירות (3%)</span>
+            <span style={{ color: "#64748b", fontSize: 12 }}>כלול</span>
+          </div>
+          <div style={{ background: "#0a0f1a", borderRadius: 8, padding: "10px 12px", marginBottom: 12 }}>
+            <div style={{ color: "#64748b", fontSize: 11, marginBottom: 4 }}>💳 תשלום מאובטח</div>
+            <div style={{ color: "#475569", fontSize: 11 }}>לאחר אישור שני הצדדים — הכסף יועבר לבעל העסק</div>
+          </div>
+          <button onClick={() => setBooked(true)}
+            style={{ width: "100%", padding: "13px", background: "linear-gradient(135deg,#22c55e,#16a34a)", border: "none", borderRadius: 12, color: "#fff", fontWeight: 800, fontSize: 15, cursor: "pointer" }}>
+            📅 אשר ושלם ₪{business.price}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BUSINESS PROFILE PAGE ───────────────────────────────────────────────────
+function BusinessProfilePage({ business, onBack, onChat, onBook }) {
+  const [reviewTab, setReviewTab] = useState(false);
+  const [newStars, setNewStars] = useState(0);
+  const [newText, setNewText] = useState("");
+
+  return (
+    <div style={{ direction: "rtl" }}>
+      <BackButton onClick={onBack} />
+
+      {/* Header */}
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 18, padding: "22px", marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 16, alignItems: "flex-start", marginBottom: 16 }}>
+          <Avatar initial={business.initial} size={64} gradient="linear-gradient(135deg,#1e40af,#7c3aed)" />
+          <div style={{ flex: 1 }}>
+            <div style={{ color: "#f1f5f9", fontWeight: 800, fontSize: 20 }}>{business.name}</div>
+            <div style={{ color: "#60a5fa", fontSize: 14, fontWeight: 600 }}>{business.title}</div>
+            <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>📍 {business.location} • {business.category}</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <ReliabilityGauge percent={business.reliability} size="md" />
+            <div style={{ color: "#64748b", fontSize: 10, marginTop: 2 }}>אמינות</div>
+          </div>
+        </div>
+
+        <p style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.6, margin: "0 0 16px" }}>{business.bio}</p>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onBook}
+            style={{ flex: 1, padding: "12px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 12, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+            📅 קבע תור
+          </button>
+          <button onClick={onChat}
+            style={{ flex: 1, padding: "12px", background: "#1e293b", border: "1px solid #334155", borderRadius: 12, color: "#94a3b8", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+            💬 צ'אט
+          </button>
+        </div>
+      </div>
+
+      {/* Price + info cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+        <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "14px", textAlign: "center" }}>
+          <div style={{ color: "#22c55e", fontWeight: 800, fontSize: 22 }}>₪{business.price}</div>
+          <div style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>לשעה</div>
+        </div>
+        <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "14px", textAlign: "center" }}>
+          <div style={{ color: "#f59e0b", fontWeight: 800, fontSize: 22 }}>{"⭐".repeat(Math.round(business.rating))}</div>
+          <div style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>{business.rating} ({business.reviews} ביקורות)</div>
+        </div>
+      </div>
+
+      {/* Insurance info */}
+      <div style={{ background: "#0f172a", border: "1px solid #1e3a5f", borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+        <div style={{ color: "#60a5fa", fontWeight: 700, fontSize: 13, marginBottom: 8 }}>🛡️ הגנת רוכש</div>
+        <ul style={{ color: "#64748b", fontSize: 12, paddingRight: 16, margin: 0, lineHeight: 1.8 }}>
+          <li>ביטול מצד העסק פחות מ-3 שעות → החזר כספי מלא</li>
+          <li>אישור התחלת פגישה על ידי שני הצדדים</li>
+          <li>אין אישור תוך 5 דקות → כסף חוזר אוטומטית</li>
+          <li>תשלום מאובטח ומוגן באפליקציה</li>
+        </ul>
+      </div>
+
+      {/* Reviews */}
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 14, padding: "16px" }}>
+        <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 15, marginBottom: 12 }}>ביקורות</div>
+        {business.reviews_list.map((r, i) => (
+          <div key={i} style={{ borderBottom: i < business.reviews_list.length - 1 ? "1px solid #1e293b" : "none", paddingBottom: 12, marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ color: "#94a3b8", fontWeight: 600, fontSize: 13 }}>{r.author}</span>
+              <span style={{ color: "#f59e0b", fontSize: 13 }}>{"⭐".repeat(r.stars)}</span>
+            </div>
+            <div style={{ color: "#64748b", fontSize: 13, lineHeight: 1.5 }}>{r.text}</div>
+          </div>
+        ))}
+        <div style={{ marginTop: 8, padding: "12px", background: "#0a0f1a", borderRadius: 10, border: "1px solid #1e293b" }}>
+          <div style={{ color: "#475569", fontSize: 12, textAlign: "center" }}>ביקורות ניתן לכתוב רק לאחר פגישה בתשלום</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── FRIEND PROFILE PAGE ────────────────────────────────────────────────────
+function FriendProfilePage({ friend, onBack, onChat }) {
+  const reliability = Math.round(((friend.meetings - friend.cancelled) / friend.meetings) * 100);
+  return (
+    <div style={{ direction: "rtl" }}>
+      <BackButton onClick={onBack} />
+
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 18, padding: "24px", marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+        <Avatar initial={friend.initial} size={72} />
+        <div style={{ color: "#f1f5f9", fontWeight: 800, fontSize: 22 }}>{friend.name}</div>
+        <div style={{ color: "#64748b", fontSize: 13 }}>חבר באפליקציה</div>
+        <button onClick={onChat}
+          style={{ padding: "10px 28px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 12, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+          💬 שלח הודעה
+        </button>
+      </div>
+
+      {/* Stats grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+        {[
+          ["פגישות סה״כ", friend.meetings, "#3b82f6"],
+          ["פגישות משותפות", friend.mutualMeetings, "#8b5cf6"],
+          ["ביטולים", friend.cancelled, "#ef4444"],
+          ["נוכחות", `${Math.round(((friend.meetings - friend.cancelled) / friend.meetings) * 100)}%`, "#22c55e"],
+        ].map(([label, val, color]) => (
+          <div key={label} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "16px", textAlign: "center" }}>
+            <div style={{ color, fontWeight: 800, fontSize: 22 }}>{val}</div>
+            <div style={{ color: "#64748b", fontSize: 11, marginTop: 4 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Sports */}
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 14, padding: "16px", marginBottom: 16 }}>
+        <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14, marginBottom: 10 }}>ספורט מועדף</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {friend.sports.map(s => (
+            <span key={s} style={{ padding: "6px 14px", background: "#1e3a5f", borderRadius: 20, color: "#60a5fa", fontSize: 13, fontWeight: 600 }}>{s}</span>
+          ))}
+        </div>
+      </div>
+
+      {/* Recent meetings */}
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 14, padding: "16px" }}>
+        <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14, marginBottom: 10 }}>פגישות אחרונות ביחד</div>
+        {[
+          { type: "כדורגל", icon: "⚽", date: "05.06.2026" },
+          { type: "בית קפה", icon: "☕", date: "28.05.2026" },
+        ].map((m, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 0", borderBottom: i === 0 ? "1px solid #1e293b" : "none" }}>
+            <span style={{ fontSize: 20 }}>{m.icon}</span>
+            <span style={{ color: "#94a3b8", fontSize: 13 }}>{m.type}</span>
+            <span style={{ marginRight: "auto", color: "#475569", fontSize: 12 }}>{m.date}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+function Sidebar({ page, setPage, sidebarOpen, setSidebarOpen, user, language, tc }) {
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const navItems = [
+    { id: "home", label: t.home, icon: "🏠" },
+    { id: "create", label: t.createMeeting, icon: "➕" },
+    { id: "meetings", label: t.myMeetings, icon: "📅" },
+    { id: "friends", label: t.friends, icon: "👥" },
+    { id: "stats", label: t.stats, icon: "📊" },
+    { id: "business", label: t.business, icon: "💼" },
+    { id: "settings", label: t.settings, icon: "⚙️" },
+  ];
+  return (
+    <>
+      {sidebarOpen && <div onClick={() => setSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 40 }} />}
+      <aside style={{
+        position: "fixed", top: 0, right: sidebarOpen ? 0 : -280, width: 260, height: "100vh",
+        background: tc.sidebarBg, borderLeft: `1px solid ${tc.border}`, display: "flex", flexDirection: "column",
+        zIndex: 50, transition: "right 0.3s cubic-bezier(.4,0,.2,1)",
+        boxShadow: sidebarOpen ? "-4px 0 32px rgba(0,0,0,0.5)" : "none", direction: "rtl",
+      }}>
+        <button onClick={() => { setPage("profile"); setSidebarOpen(false); }}
+          style={{ display: "flex", alignItems: "center", gap: 12, padding: "22px 20px", background: "none", border: "none", cursor: "pointer", borderBottom: `1px solid ${tc.border}`, width: "100%", transition: "background 0.2s" }}
+          onMouseEnter={e => e.currentTarget.style.background = tc.bgInput}
+          onMouseLeave={e => e.currentTarget.style.background = "none"}>
+          <Avatar initial={user?.name?.[0] || "א"} size={46} photo={user?.photo} />
+          <div style={{ textAlign: "right" }}>
+            <div style={{ color: tc.text, fontWeight: 700, fontSize: 15 }}>{user?.name || "אלון ישראלי"}</div>
+            <div style={{ color: tc.textMuted, fontSize: 11 }}>{TRANSLATIONS[language]?.manageProfile || "ניהול פרופיל"}</div>
+          </div>
+        </button>
+        <nav style={{ flex: 1, padding: "10px 0", overflowY: "auto" }}>
+          {navItems.map(item => (
+            <button key={item.id} onClick={() => { setPage(item.id); setSidebarOpen(false); }}
+              style={{
+                display: "flex", alignItems: "center", gap: 14, width: "100%", padding: "13px 22px",
+                background: page === item.id ? "linear-gradient(90deg,#1e40af18,#3b82f60a)" : "none",
+                border: "none", borderRight: `3px solid ${page === item.id ? "#3b82f6" : "transparent"}`,
+                cursor: "pointer", color: page === item.id ? "#60a5fa" : tc.textSub,
+                fontSize: 14, fontWeight: page === item.id ? 700 : 500, textAlign: "right", transition: "all 0.15s",
+              }}
+              onMouseEnter={e => { if (page !== item.id) { e.currentTarget.style.background = tc.bgInput + "44"; e.currentTarget.style.color = tc.text; } }}
+              onMouseLeave={e => { if (page !== item.id) { e.currentTarget.style.background = "none"; e.currentTarget.style.color = tc.textSub; } }}>
+              <span style={{ fontSize: 18 }}>{item.icon}</span>{item.label}
+            </button>
+          ))}
+        </nav>
+        <div style={{ padding: "14px 20px", borderTop: `1px solid ${tc.border}` }}>
+          <div style={{ color: tc.textMuted, fontSize: 11, textAlign: "center" }}>MeetUp v1.0</div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+// ─── CREATE MEETING ───────────────────────────────────────────────────────────
+function CreateMeetingPage({ language, tc }) {
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const dir = language === "English" ? "ltr" : "rtl";
+  const MEETING_TYPES_L = getMeetingTypes(language);
+
+  const [step, setStep] = useState(1);
+  const [selectedType, setSelectedType] = useState(null);
+  const [customType, setCustomType] = useState("");
+  const [date, setDate] = useState("");
+  const [time, setTime] = useState("");
+  const [location, setLocation] = useState("");
+  const [locationConfirmed, setLocationConfirmed] = useState(false);
+  const [selectedFriends, setSelectedFriends] = useState([]);
+  const [selectedGroups, setSelectedGroups] = useState([]);
+  const [sent, setSent] = useState(false);
+
+  const meetingLabel = selectedType === "other" ? customType : MEETING_TYPES_L.find(m => m.id === selectedType)?.label;
+  const toggleFriend = id => setSelectedFriends(p => p.includes(id) ? p.filter(f => f !== id) : [...p, id]);
+  const toggleGroup = id => {
+    const g = GROUPS.find(g => g.id === id);
+    const adding = !selectedGroups.includes(id);
+    setSelectedGroups(p => adding ? [...p, id] : p.filter(x => x !== id));
+    setSelectedFriends(p => adding ? [...new Set([...p, ...g.members])] : p.filter(f => !g.members.includes(f)));
+  };
+
+  if (sent) return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "60vh", gap: 16, direction: dir }}>
+      <div style={{ fontSize: 60 }}>🎉</div>
+      <div style={{ color: "#22c55e", fontSize: 22, fontWeight: 800 }}>{t.meetingSent}</div>
+      <div style={{ color: "#64748b", fontSize: 14 }}>{t.savedCalendar}</div>
+      <button onClick={() => { setSent(false); setStep(1); setSelectedType(null); setDate(""); setTime(""); setLocation(""); setLocationConfirmed(false); setSelectedFriends([]); setSelectedGroups([]); setCustomType(""); }}
+        style={{ marginTop: 8, padding: "12px 32px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 12, color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
+        {t.newMeeting}
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{ maxWidth: 520, margin: "0 auto", direction: dir }}>
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 20 }}>{t.createMeetingTitle}</h2>
+      <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
+        {[t.typeStep, t.dateStep, t.locationStep, t.friendsStep].map((s, i) => (
+          <div key={i} style={{ flex: 1, textAlign: "center" }}>
+            <div style={{ height: 4, borderRadius: 4, marginBottom: 6, background: step > i + 1 ? "#22c55e" : step === i + 1 ? "#3b82f6" : tc.bgInput, transition: "background 0.3s" }} />
+            <span style={{ fontSize: 11, color: step >= i + 1 ? tc.textSub : tc.textMuted }}>{s}</span>
+          </div>
+        ))}
+      </div>
+
+      {step === 1 && (
+        <div>
+          <p style={{ color: tc.textSub, marginBottom: 14, fontSize: 14 }}>{t.chooseType}</p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+            {MEETING_TYPES_L.map(mt => (
+              <button key={mt.id} onClick={() => setSelectedType(mt.id)}
+                style={{ padding: "14px 6px", borderRadius: 12, border: `2px solid ${selectedType === mt.id ? "#3b82f6" : tc.border}`, background: selectedType === mt.id ? "#1e3a5f" : tc.bgCard, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 6, transition: "all 0.15s" }}>
+                <span style={{ fontSize: 22 }}>{mt.icon}</span>
+                <span style={{ color: selectedType === mt.id ? "#60a5fa" : tc.textSub, fontSize: 11, fontWeight: 600 }}>{mt.label}</span>
+              </button>
+            ))}
+          </div>
+          {selectedType === "other" && (
+            <input value={customType} onChange={e => setCustomType(e.target.value)} placeholder={t.enterMeetingName}
+              style={{ marginTop: 14, width: "100%", padding: "12px 16px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontSize: 14, direction: dir, boxSizing: "border-box" }} />
+          )}
+          <button disabled={!selectedType || (selectedType === "other" && !customType)} onClick={() => setStep(2)}
+            style={{ marginTop: 18, width: "100%", padding: "14px", background: selectedType ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : tc.bgInput, border: "none", borderRadius: 12, color: selectedType ? "#fff" : tc.textMuted, fontWeight: 700, fontSize: 15, cursor: selectedType ? "pointer" : "not-allowed" }}>{t.next}</button>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <p style={{ color: tc.textSub, fontSize: 14 }}>{t.dateTime}: <strong style={{ color: "#60a5fa" }}>{meetingLabel}</strong></p>
+          <div>
+            <label style={{ color: tc.textMuted, fontSize: 12, display: "block", marginBottom: 6 }}>{t.dateLabel}</label>
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ width: "100%", padding: "12px 16px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontSize: 14, boxSizing: "border-box" }} />
+          </div>
+          <div>
+            <label style={{ color: tc.textMuted, fontSize: 12, display: "block", marginBottom: 6 }}>{t.timeLabel}</label>
+            <input type="time" value={time} onChange={e => setTime(e.target.value)} style={{ width: "100%", padding: "12px 16px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontSize: 14, boxSizing: "border-box" }} />
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => setStep(1)} style={{ flex: 1, padding: "13px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 12, color: tc.textSub, fontWeight: 600, cursor: "pointer" }}>{t.back}</button>
+            <button disabled={!date || !time} onClick={() => setStep(3)} style={{ flex: 2, padding: "13px", background: date && time ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : tc.bgInput, border: "none", borderRadius: 12, color: date && time ? "#fff" : tc.textMuted, fontWeight: 700, cursor: date && time ? "pointer" : "not-allowed" }}>{t.next}</button>
+          </div>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <p style={{ color: tc.textSub, fontSize: 14 }}>{t.chooseLocation}</p>
+          <input placeholder={t.enterLocation} value={location} onInput={e => { setLocation(e.target.value); setLocationConfirmed(false); }} onChange={() => {}}
+            style={{ width: "100%", padding: "12px 16px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontSize: 14, direction: dir, boxSizing: "border-box" }} />
+          {location && !locationConfirmed && (
+            <div style={{ display: "flex", gap: 10 }}>
+              <a href={`https://waze.com/ul?q=${encodeURIComponent(location)}`} target="_blank" rel="noreferrer"
+                style={{ flex: 1, padding: "11px", background: "#1a3a5c", border: "1px solid #2d6fa8", borderRadius: 10, color: "#60a5fa", fontWeight: 600, fontSize: 13, textAlign: "center", textDecoration: "none" }}>🔵 Waze</a>
+              <a href={`https://maps.google.com/?q=${encodeURIComponent(location)}`} target="_blank" rel="noreferrer"
+                style={{ flex: 1, padding: "11px", background: "#1a3a5c", border: "1px solid #2d6fa8", borderRadius: 10, color: "#60a5fa", fontWeight: 600, fontSize: 13, textAlign: "center", textDecoration: "none" }}>🗺️ Maps</a>
+            </div>
+          )}
+          {location && (
+            <button onClick={() => setLocationConfirmed(true)}
+              style={{ padding: "13px", background: locationConfirmed ? "#14532d" : tc.bgInput, border: `2px solid ${locationConfirmed ? "#22c55e" : tc.border}`, borderRadius: 12, color: locationConfirmed ? "#22c55e" : tc.textSub, fontWeight: 700, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              {locationConfirmed ? <>✅ {t.locationChosen}: {location}</> : t.confirmLocation}
+            </button>
+          )}
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => setStep(2)} style={{ flex: 1, padding: "13px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 12, color: tc.textSub, fontWeight: 600, cursor: "pointer" }}>{t.back}</button>
+            <button disabled={!locationConfirmed} onClick={() => setStep(4)} style={{ flex: 2, padding: "13px", background: locationConfirmed ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : tc.bgInput, border: "none", borderRadius: 12, color: locationConfirmed ? "#fff" : tc.textMuted, fontWeight: 700, cursor: locationConfirmed ? "pointer" : "not-allowed" }}>{t.next}</button>
+          </div>
+        </div>
+      )}
+
+      {step === 4 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <p style={{ color: tc.textSub, fontSize: 14 }}>{t.chooseFriends}</p>
+          <div style={{ color: tc.textMuted, fontSize: 12 }}>{t.groupsLabel}</div>
+          {GROUPS.map(g => (
+            <button key={g.id} onClick={() => toggleGroup(g.id)}
+              style={{ padding: "11px 14px", borderRadius: 10, border: `2px solid ${selectedGroups.includes(g.id) ? "#3b82f6" : tc.border}`, background: selectedGroups.includes(g.id) ? "#1e3a5f" : tc.bgCard, color: selectedGroups.includes(g.id) ? "#60a5fa" : tc.textSub, cursor: "pointer", textAlign: dir === "ltr" ? "left" : "right", fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 18 }}>👥</span> {g.name}
+              <span style={{ marginRight: dir === "rtl" ? "auto" : 0, marginLeft: dir === "ltr" ? "auto" : 0, fontSize: 12, opacity: 0.6 }}>{g.members.length} {t.members}</span>
+            </button>
+          ))}
+          <div style={{ color: tc.textMuted, fontSize: 12, marginTop: 4 }}>{t.friendsLabel}</div>
+          {FRIENDS.map(f => (
+            <button key={f.id} onClick={() => toggleFriend(f.id)}
+              style={{ padding: "10px 12px", borderRadius: 10, border: `2px solid ${selectedFriends.includes(f.id) ? "#3b82f6" : tc.border}`, background: selectedFriends.includes(f.id) ? "#1e3a5f" : tc.bgCard, cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}>
+              <Avatar initial={f.initial} size={32} />
+              <span style={{ color: selectedFriends.includes(f.id) ? "#60a5fa" : tc.textSub, fontWeight: 600, fontSize: 14 }}>{f.name}</span>
+              {selectedFriends.includes(f.id) && <span style={{ marginRight: dir === "rtl" ? "auto" : 0, marginLeft: dir === "ltr" ? "auto" : 0, color: "#22c55e" }}>✓</span>}
+            </button>
+          ))}
+          <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+            <button onClick={() => setStep(3)} style={{ flex: 1, padding: "13px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 12, color: tc.textSub, fontWeight: 600, cursor: "pointer" }}>{t.back}</button>
+            <button disabled={selectedFriends.length === 0} onClick={() => setSent(true)}
+              style={{ flex: 2, padding: "13px", background: selectedFriends.length > 0 ? "linear-gradient(135deg,#22c55e,#16a34a)" : tc.bgInput, border: "none", borderRadius: 12, color: selectedFriends.length > 0 ? "#fff" : tc.textMuted, fontWeight: 700, fontSize: 14, cursor: selectedFriends.length > 0 ? "pointer" : "not-allowed" }}>
+              {t.sendFriends}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MEETINGS ────────────────────────────────────────────────────────────────
+function MeetingsPage({ language, tc }) {
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const [tab, setTab] = useState("mine");
+  const meetings = tab === "mine" ? MY_MEETINGS : INVITED_MEETINGS;
+  const dir = language === "English" ? "ltr" : "rtl";
+  return (
+    <div style={{ direction: dir }}>
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 18 }}>{t.meetings}</h2>
+      <div style={{ display: "flex", gap: 0, marginBottom: 22, background: tc.bgInput, borderRadius: 12, padding: 4 }}>
+        {[["mine", t.myMeetingsList], ["invited", t.invited]].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)}
+            style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: tab === id ? "#3b82f6" : "transparent", color: tab === id ? "#fff" : tc.textSub, transition: "all 0.2s" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {meetings.map(m => (
+          <div key={m.id} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "16px 18px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+              <span style={{ fontSize: 28 }}>{m.icon}</span>
+              <div>
+                <div style={{ color: tc.text, fontWeight: 700, fontSize: 16 }}>{m.type}</div>
+                <div style={{ color: tc.textSub, fontSize: 12 }}>{tab === "invited" ? `${t.createdBy} ${m.organizer}` : (m.invitees || []).join(", ")}</div>
+              </div>
+              <span style={{ marginRight: "auto", padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, background: m.status === "confirmed" ? "#14532d" : m.status === "accepted" ? "#1e3a5f" : "#451a03", color: m.status === "confirmed" ? "#22c55e" : m.status === "accepted" ? "#60a5fa" : "#f59e0b" }}>
+                {m.status === "confirmed" ? t.confirmed : m.status === "accepted" ? t.accepted : t.pending}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 16 }}>
+              <div style={{ color: tc.textSub, fontSize: 13 }}>📅 {m.date} • {m.time}</div>
+              <div style={{ color: tc.textSub, fontSize: 13 }}>📍 {m.location}</div>
+            </div>
+            {tab === "invited" && m.status === "pending" && (
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button style={{ flex: 1, padding: "9px", background: "#14532d", border: "none", borderRadius: 8, color: "#22c55e", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>{t.confirm}</button>
+                <button style={{ flex: 1, padding: "9px", background: "#450a0a", border: "none", borderRadius: 8, color: "#ef4444", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>{t.reject}</button>
+                <button style={{ flex: 1, padding: "9px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 8, color: tc.textSub, fontWeight: 700, fontSize: 12, cursor: "pointer" }}>{t.addCalendar}</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── FRIENDS ─────────────────────────────────────────────────────────────────
+function FriendsPage({ navigate, language, tc }) {
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const dir = language === "English" ? "ltr" : "rtl";
+  return (
+    <div style={{ direction: dir }}>
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 18 }}>{t.friends}</h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {FRIENDS.map(f => {
+          const rel = Math.round(((f.meetings - f.cancelled) / f.meetings) * 100);
+          return (
+            <button key={f.id} onClick={() => navigate("friendProfile", { friend: f })}
+              style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", textAlign: "right", width: "100%" }}>
+              <Avatar initial={f.initial} size={44} />
+              <div style={{ flex: 1 }}>
+                <div style={{ color: tc.text, fontWeight: 700, fontSize: 15 }}>{f.name}</div>
+                <div style={{ color: tc.textSub, fontSize: 12, marginTop: 2 }}>{f.mutualMeetings} {t.mutualMeetings}</div>
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ color: rel >= 80 ? "#22c55e" : rel >= 60 ? "#f59e0b" : "#ef4444", fontWeight: 800, fontSize: 16 }}>{rel}%</div>
+                <div style={{ color: tc.textMuted, fontSize: 10 }}>{t.attendance}</div>
+              </div>
+              <span style={{ color: tc.textMuted, fontSize: 18 }}>‹</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── STATS ───────────────────────────────────────────────────────────────────
+function StatsPage({ language, tc }) {
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const dir = language === "English" ? "ltr" : "rtl";
+  return (
+    <div style={{ direction: dir }}>
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 18 }}>{t.statsTitle}</h2>
+      <p style={{ color: tc.textSub, fontSize: 13, marginBottom: 18 }}>{t.statsSubtitle}</p>
+      {STATS.map((s, i) => (
+        <div key={i} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+            <span style={{ fontSize: 18, fontWeight: 800, color: i === 0 ? "#f59e0b" : i === 1 ? "#94a3b8" : "#8b5cf640", minWidth: 24 }}>#{i + 1}</span>
+            <Avatar initial={s.initial} size={36} />
+            <div style={{ flex: 1 }}>
+              <div style={{ color: tc.text, fontWeight: 700, fontSize: 14 }}>{s.friend}</div>
+              <div style={{ color: tc.textSub, fontSize: 12 }}>{s.attended}/{s.total} • {s.cancelled} ביטולים</div>
+            </div>
+          </div>
+          <div style={{ background: tc.bgInput, borderRadius: 6, height: 8, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${(s.attended / s.total) * 100}%`, background: "linear-gradient(90deg,#3b82f6,#22c55e)", borderRadius: 6 }} />
+          </div>
+          <div style={{ color: tc.textSub, fontSize: 11, marginTop: 4, textAlign: "left" }}>{Math.round((s.attended / s.total) * 100)}%</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── BUSINESS PAGE ────────────────────────────────────────────────────────────
+function BusinessPage({ navigate }) {
+  const [subTab, setSubTab] = useState("search");
+  const [query, setQuery] = useState("");
+  const [lookingForWork, setLookingForWork] = useState(false);
+  const [myBusiness, setMyBusiness] = useState(null);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [pendingBusiness, setPendingBusiness] = useState(null);
+
+  // Form fields
+  const [bizName, setBizName] = useState("");
+  const [bizTitle, setBizTitle] = useState("");
+  const [bizCategory, setBizCategory] = useState("");
+  const [bizBio, setBizBio] = useState("");
+  const [bizPrice, setBizPrice] = useState("");
+  const [bizLocation, setBizLocation] = useState("");
+  const [lookingForEmployees, setLookingForEmployees] = useState(false);
+
+  const filtered = BUSINESSES.filter(b =>
+    query === "" || b.title.includes(query) || b.name.includes(query) || b.category.includes(query)
+  );
+
+  const handlePublish = () => {
+    if (!bizName || !bizTitle || !bizPrice) return;
+    const newBiz = {
+      id: Date.now(), name: bizName, title: bizTitle, initial: bizName[0] || "א",
+      category: bizCategory || "אחר", rating: 0, reviews: 0, reliability: 100,
+      price: Number(bizPrice), location: bizLocation || "ישראל",
+      bio: bizBio || "", lookingForStudents: lookingForEmployees,
+      schedule: {}, bookedSlots: {}, reviews_list: [],
+    };
+    setPendingBusiness(newBiz);
+    setShowConfirm(true);
+  };
+
+  const handleConfirmOk = () => {
+    setMyBusiness(pendingBusiness);
+    setShowConfirm(false);
+    setSubTab("search");
+  };
+
+  // Confirmation modal
+  if (showConfirm) return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "60vh", gap: 18, direction: "rtl" }}>
+      <div style={{ fontSize: 64 }}>🎉</div>
+      <div style={{ color: "#22c55e", fontWeight: 800, fontSize: 22 }}>העסק נוצר!</div>
+      <div style={{ color: "#94a3b8", fontSize: 14, textAlign: "center" }}>
+        הפרופיל של <strong style={{ color: "#60a5fa" }}>{pendingBusiness?.name}</strong> פורסם בהצלחה
+      </div>
+      <button onClick={handleConfirmOk}
+        style={{ marginTop: 8, padding: "14px 40px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 12, color: "#fff", fontWeight: 700, fontSize: 16, cursor: "pointer" }}>
+        אישור
+      </button>
+    </div>
+  );
+
+  // My business profile view
+  if (subTab === "myBusiness" && myBusiness) return (
+    <div style={{ direction: "rtl" }}>
+      <div style={{ display: "flex", gap: 0, marginBottom: 22, background: "#1e293b", borderRadius: 12, padding: 4 }}>
+        <button onClick={() => setSubTab("search")}
+          style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: "transparent", color: "#64748b" }}>
+          חפש עסק
+        </button>
+        <button style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: "#3b82f6", color: "#fff" }}>
+          העסק שלי
+        </button>
+      </div>
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 18, padding: "22px", marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 14 }}>
+          <Avatar initial={myBusiness.initial} size={64} gradient="linear-gradient(135deg,#1e40af,#7c3aed)" />
+          <div>
+            <div style={{ color: "#f1f5f9", fontWeight: 800, fontSize: 20 }}>{myBusiness.name}</div>
+            <div style={{ color: "#60a5fa", fontSize: 14, fontWeight: 600 }}>{myBusiness.title}</div>
+            <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>📍 {myBusiness.location} • {myBusiness.category}</div>
+          </div>
+        </div>
+        {myBusiness.bio && <p style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.6, margin: "0 0 14px" }}>{myBusiness.bio}</p>}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          {[["₪" + myBusiness.price, "לשעה", "#22c55e"], ["0", "תורים", "#3b82f6"], ["100%", "אמינות", "#8b5cf6"]].map(([val, label, color]) => (
+            <div key={label} style={{ background: "#0a0f1a", borderRadius: 10, padding: "12px", textAlign: "center" }}>
+              <div style={{ color, fontWeight: 800, fontSize: 18 }}>{val}</div>
+              <div style={{ color: "#475569", fontSize: 11, marginTop: 3 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ background: "#0f172a", border: "1px solid #1e3a5f", borderRadius: 14, padding: "14px 16px", marginBottom: 12 }}>
+        <div style={{ color: "#60a5fa", fontWeight: 700, fontSize: 13, marginBottom: 8 }}>💳 חיבור חשבון בנק</div>
+        <div style={{ color: "#64748b", fontSize: 12, marginBottom: 10 }}>חבר חשבון בנק כדי לקבל תשלומים מלקוחות</div>
+        <button style={{ width: "100%", padding: "11px", background: "#1e293b", border: "1px solid #334155", borderRadius: 10, color: "#94a3b8", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+          🔗 הוסף חשבון בנק
+        </button>
+      </div>
+      <button onClick={() => setSubTab("editBusiness")}
+        style={{ width: "100%", padding: "12px", background: "#1e293b", border: "1px solid #334155", borderRadius: 12, color: "#94a3b8", fontWeight: 600, fontSize: 14, cursor: "pointer" }}>
+        ✏️ ערוך פרופיל עסקי
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{ direction: "rtl" }}>
+      <h2 style={{ color: "#f1f5f9", fontWeight: 800, fontSize: 22, marginBottom: 18 }}>עסקים</h2>
+      <div style={{ display: "flex", gap: 0, marginBottom: 22, background: "#1e293b", borderRadius: 12, padding: 4 }}>
+        <button onClick={() => setSubTab("search")}
+          style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: subTab === "search" ? "#3b82f6" : "transparent", color: subTab === "search" ? "#fff" : "#64748b", transition: "all 0.2s" }}>
+          חפש עסק
+        </button>
+        {myBusiness ? (
+          <button onClick={() => setSubTab("myBusiness")}
+            style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: subTab === "myBusiness" ? "#3b82f6" : "transparent", color: subTab === "myBusiness" ? "#fff" : "#64748b", transition: "all 0.2s" }}>
+            העסק שלי
+          </button>
+        ) : (
+          <button onClick={() => setSubTab("create")}
+            style={{ flex: 1, padding: "10px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: subTab === "create" ? "#3b82f6" : "transparent", color: subTab === "create" ? "#fff" : "#64748b", transition: "all 0.2s" }}>
+            צור עסק
+          </button>
+        )}
+      </div>
+
+      {subTab === "search" && (
+        <div>
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="חפש עסק... (לדוגמה: מורה לחשבון)"
+            style={{ width: "100%", padding: "13px 16px", background: "#1e293b", border: "1px solid #334155", borderRadius: 12, color: "#f1f5f9", fontSize: 14, direction: "rtl", boxSizing: "border-box", marginBottom: 16 }} />
+
+          {/* Job search toggle */}
+          <div style={{ background: "#0f172a", border: "1px solid #1e3a5f", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
+            <div style={{ color: "#60a5fa", fontWeight: 700, fontSize: 14, marginBottom: 8 }}>🔍 חיפוש עבודה</div>
+            <div style={{ color: "#64748b", fontSize: 12, marginBottom: 12 }}>אם אתה מחפש עבודה, הפעל את הכפתור ועסקים שמחפשים יקשרו אליך</div>
+            <button onClick={() => setLookingForWork(!lookingForWork)}
+              style={{ width: "100%", padding: "11px", background: lookingForWork ? "#14532d" : "#1e293b", border: `2px solid ${lookingForWork ? "#22c55e" : "#334155"}`, borderRadius: 10, color: lookingForWork ? "#22c55e" : "#94a3b8", fontWeight: 700, fontSize: 13, cursor: "pointer", transition: "all 0.2s" }}>
+              {lookingForWork ? "✅ אני מחפש עבודה (פעיל)" : "🔍 אני מחפש עבודה"}
+            </button>
+          </div>
+
+          {filtered.map(b => (
+            <div key={b.id} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 14, padding: "16px", marginBottom: 12 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12 }}>
+                <Avatar initial={b.initial} size={48} gradient="linear-gradient(135deg,#1e40af,#7c3aed)" />
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 15 }}>{b.name}</div>
+                  <div style={{ color: "#60a5fa", fontSize: 13, fontWeight: 600 }}>{b.title}</div>
+                  <div style={{ color: "#64748b", fontSize: 12 }}>📍 {b.location} • ₪{b.price}/שעה</div>
+                  <div style={{ color: "#f59e0b", fontSize: 13, marginTop: 4 }}>{"⭐".repeat(Math.round(b.rating))} {b.rating} ({b.reviews})</div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <ReliabilityGauge percent={b.reliability} size="md" />
+                  <div style={{ color: "#475569", fontSize: 10 }}>אמינות</div>
+                </div>
+              </div>
+              {b.lookingForStudents && (
+                <div style={{ background: "#1e3a5f", borderRadius: 8, padding: "7px 12px", marginBottom: 10, fontSize: 12, color: "#60a5fa", fontWeight: 600 }}>
+                  🟢 מחפש תלמידים
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => navigate("businessProfile", { business: b })}
+                  style={{ flex: 2, padding: "11px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 10, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                  צפה בפרופיל
+                </button>
+                <button onClick={() => navigate("businessChat", { business: b })}
+                  style={{ flex: 1, padding: "11px", background: "#1e293b", border: "1px solid #334155", borderRadius: 10, color: "#94a3b8", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                  💬
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {subTab === "create" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ background: "#0f172a", border: "1px solid #1e3a5f", borderRadius: 14, padding: "14px 16px", marginBottom: 4 }}>
+            <div style={{ color: "#60a5fa", fontWeight: 700, fontSize: 14, marginBottom: 6 }}>💼 מודל עסקי</div>
+            <div style={{ color: "#64748b", fontSize: 12, lineHeight: 1.7 }}>
+              פרסם את העסק שלך באפליקציה. כל תשלום שעובר דרכנו — אנחנו מעבירים לך את הכסף, גובים עמלה משותפת של 3%. תשלום מאובטח ומוגן.
+            </div>
+          </div>
+
+          {/* Looking for employees toggle */}
+          <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "14px 16px" }}>
+            <div style={{ color: "#f1f5f9", fontWeight: 600, fontSize: 14, marginBottom: 8 }}>🔍 אני מחפש עובדים</div>
+            <button onClick={() => setLookingForEmployees(v => !v)}
+              style={{ width: "100%", padding: "10px", background: lookingForEmployees ? "#14532d" : "#1e293b", border: `2px solid ${lookingForEmployees ? "#22c55e" : "#334155"}`, borderRadius: 10, color: lookingForEmployees ? "#22c55e" : "#94a3b8", fontWeight: 600, fontSize: 13, cursor: "pointer", transition: "all 0.2s" }}>
+              {lookingForEmployees ? "✅ מחפש עובדים (פעיל)" : "הפעל — יחבר אותך למחפשי עבודה רלוונטיים"}
+            </button>
+          </div>
+
+          {[
+            ["שם מלא *", "text", "ישראל ישראלי", bizName, setBizName],
+            ["כותרת מקצועית *", "text", "מורה פרטי לחשבון", bizTitle, setBizTitle],
+            ["קטגוריה", "text", "חינוך / ספורט / אחר", bizCategory, setBizCategory],
+            ["תיאור קצר", "text", "ספר על השירות שלך...", bizBio, setBizBio],
+            ["מחיר לשעה (₪) *", "number", "150", bizPrice, setBizPrice],
+            ["עיר / אזור", "text", "תל אביב", bizLocation, setBizLocation],
+          ].map(([label, type, ph, val, setter]) => (
+            <div key={label}>
+              <label style={{ color: "#64748b", fontSize: 12, display: "block", marginBottom: 6 }}>{label}</label>
+              <input type={type} placeholder={ph} value={val} onChange={e => setter(e.target.value)}
+                style={{ width: "100%", padding: "12px 16px", background: "#1e293b", border: "1px solid #334155", borderRadius: 10, color: "#f1f5f9", fontSize: 14, direction: "rtl", boxSizing: "border-box" }} />
+            </div>
+          ))}
+          <button onClick={handlePublish}
+            disabled={!bizName || !bizTitle || !bizPrice}
+            style={{ marginTop: 6, padding: "14px", background: bizName && bizTitle && bizPrice ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : "#1e293b", border: "none", borderRadius: 12, color: bizName && bizTitle && bizPrice ? "#fff" : "#475569", fontWeight: 700, fontSize: 15, cursor: bizName && bizTitle && bizPrice ? "pointer" : "not-allowed" }}>
+            🚀 פרסם עסק
+          </button>
+          <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ color: "#475569", fontSize: 11, lineHeight: 1.7 }}>
+              🛡️ <strong style={{ color: "#64748b" }}>הגנת לקוח:</strong> ביטול בפחות מ-3 שעות → החזר מלא. לשני הצדדים תישלח הודעת אישור בתחילת הפגישה. ללא אישור תוך 5 דקות — הכסף חוזר אוטומטית.
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── HOME ────────────────────────────────────────────────────────────────────
+function HomePage({ setPage, user, language, tc }) {
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const dir = language === "English" ? "ltr" : "rtl";
+  return (
+    <div style={{ direction: dir }}>
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ color: tc.textSub, fontSize: 14 }}>{t.hello}</div>
+        <div style={{ color: tc.text, fontWeight: 800, fontSize: 26 }}>{user?.name || "אלון ישראלי"} 👋</div>
+      </div>
+      <button onClick={() => setPage("create")} style={{ width: "100%", padding: "18px", marginBottom: 24, background: "linear-gradient(135deg,#1e3a8a,#7c3aed)", border: "1px solid #3b82f640", borderRadius: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 14, boxShadow: "0 4px 24px rgba(59,130,246,0.15)" }}>
+        <div style={{ width: 48, height: 48, borderRadius: 12, background: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>➕</div>
+        <div style={{ textAlign: dir === "ltr" ? "left" : "right" }}>
+          <div style={{ color: "#fff", fontWeight: 700, fontSize: 16 }}>{t.createNewMeeting}</div>
+          <div style={{ color: "#93c5fd", fontSize: 12, marginTop: 2 }}>{t.bookNow}</div>
+        </div>
+      </button>
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ color: tc.text, fontWeight: 700, fontSize: 16 }}>{t.invited}</div>
+          <button onClick={() => setPage("meetings")} style={{ background: "none", border: "none", color: "#3b82f6", fontSize: 12, cursor: "pointer" }}>{t.all}</button>
+        </div>
+        {INVITED_MEETINGS.slice(0, 2).map(m => (
+          <div key={m.id} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "13px 15px", marginBottom: 8, display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 24 }}>{m.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: tc.text, fontWeight: 600, fontSize: 14 }}>{m.type}</div>
+              <div style={{ color: tc.textSub, fontSize: 12 }}>{m.date} • {m.time} • {m.location}</div>
+            </div>
+            <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 20, background: m.status === "accepted" ? "#1e3a5f" : "#451a03", color: m.status === "accepted" ? "#60a5fa" : "#f59e0b" }}>
+              {m.status === "accepted" ? t.accepted : t.pending}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ color: tc.text, fontWeight: 700, fontSize: 16 }}>{t.myMeetingsList}</div>
+          <button onClick={() => setPage("meetings")} style={{ background: "none", border: "none", color: "#3b82f6", fontSize: 12, cursor: "pointer" }}>{t.all}</button>
+        </div>
+        {MY_MEETINGS.slice(0, 2).map(m => (
+          <div key={m.id} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "13px 15px", marginBottom: 8, display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 24 }}>{m.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: tc.text, fontWeight: 600, fontSize: 14 }}>{m.type}</div>
+              <div style={{ color: tc.textSub, fontSize: 12 }}>{m.date} • {m.time} • {m.location}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── PROFILE ─────────────────────────────────────────────────────────────────
+function ProfilePage({ user, language, tc }) {
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const dir = language === "English" ? "ltr" : "rtl";
+  const [editing, setEditing] = useState(false);
+  const [tempName, setTempName] = useState(user.name);
+  const [tempEmail, setTempEmail] = useState(user.email);
+
+  const handlePhotoChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => user.setPhoto(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div style={{ direction: dir }}>
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 22 }}>{t.profile}</h2>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, marginBottom: 24, padding: "26px", background: tc.bgCard, borderRadius: 18, border: `1px solid ${tc.border}` }}>
+
+        {/* Photo upload */}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+          <div style={{ position: "relative" }}>
+            <Avatar initial={user.name[0] || "א"} size={80} photo={user.photo} />
+            <div style={{ position: "absolute", bottom: 0, right: 0, width: 24, height: 24, borderRadius: "50%", background: "#3b82f6", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, boxShadow: "0 2px 6px rgba(0,0,0,0.4)", pointerEvents: "none" }}>📷</div>
+          </div>
+          <label style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "8px 18px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)",
+            borderRadius: 10, cursor: "pointer", color: "#fff", fontSize: 13, fontWeight: 700,
+            boxShadow: "0 2px 8px rgba(59,130,246,0.3)"
+          }}>
+            📷 {t.clickToChange}
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handlePhotoChange}
+              style={{ display: "none" }}
+            />
+          </label>
+          {user.photo && (
+            <button onClick={() => user.setPhoto(null)}
+              style={{ padding: "4px 12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 8, color: "#ef4444", fontSize: 11, cursor: "pointer" }}>
+              {t.removePhoto}
+            </button>
+          )}
+        </div>
+
+        {editing ? (
+          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div>
+              <label style={{ color: tc.textSub, fontSize: 12, display: "block", marginBottom: 5 }}>{t.fullName}</label>
+              <input value={tempName} onChange={e => setTempName(e.target.value)}
+                style={{ width: "100%", padding: "10px 14px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontSize: 14, direction: dir, boxSizing: "border-box" }} />
+            </div>
+            <div>
+              <label style={{ color: tc.textSub, fontSize: 12, display: "block", marginBottom: 5 }}>{t.email}</label>
+              <input value={tempEmail} onChange={e => setTempEmail(e.target.value)}
+                style={{ width: "100%", padding: "10px 14px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontSize: 14, direction: "ltr", boxSizing: "border-box" }} />
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={async () => {
+                user.setName(tempName); user.setEmail(tempEmail); setEditing(false);
+                if (user.supabaseId) {
+                  await supabase.from("profiles").upsert({ id: user.supabaseId, full_name: tempName, email: tempEmail });
+                }
+              }}
+                style={{ flex: 1, padding: "10px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 10, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>{t.save}</button>
+              <button onClick={() => { setTempName(user.name); setTempEmail(user.email); setEditing(false); }}
+                style={{ flex: 1, padding: "10px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.textSub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>{t.cancel}</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ color: tc.text, fontWeight: 800, fontSize: 22 }}>{user.name}</div>
+            <div style={{ color: tc.textSub, fontSize: 13 }}>{user.email}</div>
+            <button onClick={() => { setTempName(user.name); setTempEmail(user.email); setEditing(true); }}
+              style={{ padding: "8px 22px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.textSub, fontSize: 13, cursor: "pointer" }}>{t.editProfile}</button>
+          </>
+        )}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        {[[t.meetingsCreated, "12", "#3b82f6"], [t.meetingsAttended, "18", "#8b5cf6"], [t.friendsCount, "5", "#22c55e"], [t.cancellations, "1", "#ef4444"]].map(([label, val, color]) => (
+          <div key={label} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "16px", textAlign: "center" }}>
+            <div style={{ color, fontWeight: 800, fontSize: 28 }}>{val}</div>
+            <div style={{ color: tc.textSub, fontSize: 12, marginTop: 4 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SettingsPage({ settings, tc }) {
+  const { notifications, setNotifications, calendarSync, setCalendarSync, privacy, setPrivacy, theme, setTheme, language, setLanguage } = settings;
+  const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
+  const dir = language === "العربية" ? "rtl" : language === "English" ? "ltr" : "rtl";
+  const [expandedSection, setExpandedSection] = useState(null);
+  const [modal, setModal] = useState(null); // "password" | "devices" | "logout"
+  const [oldPw, setOldPw] = useState(""); const [newPw, setNewPw] = useState(""); const [confirmPw, setConfirmPw] = useState("");
+  const [pwSaved, setPwSaved] = useState(false);
+
+  const Toggle = ({ value, onToggle }) => (
+    <div onClick={onToggle} style={{
+      width: 44, height: 24, borderRadius: 12, cursor: "pointer", transition: "background 0.2s",
+      background: value ? "#3b82f6" : tc.bgInput, border: `2px solid ${value ? "#3b82f6" : tc.border}`,
+      position: "relative", flexShrink: 0,
+    }}>
+      <div style={{
+        width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute",
+        top: 2, left: value ? 22 : 2, transition: "left 0.2s",
+      }} />
+    </div>
+  );
+
+  const Modal = ({ children }) => (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 18, padding: 24, width: "100%", maxWidth: 360, direction: dir }}>
+        {children}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ direction: dir }}>
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 18 }}>{t.settingsTitle}</h2>
+
+      {/* Password modal */}
+      {modal === "password" && (
+        <Modal>
+          <div style={{ color: tc.text, fontWeight: 800, fontSize: 18, marginBottom: 16 }}>🔑 {t.changePasswordTitle}</div>
+          {pwSaved ? (
+            <div style={{ textAlign: "center", padding: "20px 0" }}>
+              <div style={{ fontSize: 40, marginBottom: 10 }}>✅</div>
+              <div style={{ color: "#22c55e", fontWeight: 700 }}>{language === "English" ? "Password updated!" : language === "العربية" ? "تم تحديث كلمة المرور!" : "הסיסמה עודכנה!"}</div>
+              <button onClick={() => { setModal(null); setPwSaved(false); setOldPw(""); setNewPw(""); setConfirmPw(""); }}
+                style={{ marginTop: 16, padding: "10px 28px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 10, color: "#fff", fontWeight: 700, cursor: "pointer" }}>{t.cancel}</button>
+            </div>
+          ) : (
+            <>
+              {[t.currentPassword, t.newPassword, t.confirmPassword].map((label, i) => (
+                <div key={i} style={{ marginBottom: 12 }}>
+                  <label style={{ color: tc.textSub, fontSize: 12, display: "block", marginBottom: 4 }}>{label}</label>
+                  <input type="password" value={i===0?oldPw:i===1?newPw:confirmPw} onChange={e=>{if(i===0)setOldPw(e.target.value);else if(i===1)setNewPw(e.target.value);else setConfirmPw(e.target.value);}}
+                    style={{ width: "100%", padding: "10px 12px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontSize: 14, boxSizing: "border-box", direction: "ltr" }} />
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                <button onClick={() => { if(newPw && newPw===confirmPw) setPwSaved(true); }}
+                  disabled={!oldPw || !newPw || newPw !== confirmPw}
+                  style={{ flex: 1, padding: "11px", background: oldPw && newPw && newPw===confirmPw ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : tc.bgInput, border: "none", borderRadius: 10, color: oldPw && newPw && newPw===confirmPw ? "#fff" : tc.textSub, fontWeight: 700, cursor: "pointer" }}>{t.update}</button>
+                <button onClick={() => { setModal(null); setOldPw(""); setNewPw(""); setConfirmPw(""); }}
+                  style={{ flex: 1, padding: "11px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.textSub, fontWeight: 600, cursor: "pointer" }}>{t.cancel}</button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+
+      {/* Devices modal */}
+      {modal === "devices" && (
+        <Modal>
+          <div style={{ color: tc.text, fontWeight: 800, fontSize: 18, marginBottom: 16 }}>📱 {t.devicesTitle}</div>
+          {[
+            { name: t.thisDevice, icon: "📱", active: true },
+            { name: "iPhone 14 Pro", icon: "📱", active: false },
+            { name: "iPad Mini", icon: "💻", active: false },
+          ].map((d, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderBottom: i < 2 ? `1px solid ${tc.border}` : "none" }}>
+              <span style={{ fontSize: 22 }}>{d.icon}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ color: tc.text, fontWeight: 600, fontSize: 14 }}>{d.name}</div>
+                {d.active && <div style={{ color: "#22c55e", fontSize: 11 }}>● {language === "English" ? "Active now" : language === "العربية" ? "نشط الآن" : "פעיל עכשיו"}</div>}
+              </div>
+              {!d.active && <button style={{ padding: "5px 12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 8, color: "#ef4444", fontSize: 12, cursor: "pointer" }}>{t.removeDevice}</button>}
+            </div>
+          ))}
+          <button onClick={() => setModal(null)}
+            style={{ marginTop: 16, width: "100%", padding: "11px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.textSub, fontWeight: 600, cursor: "pointer" }}>{t.cancel}</button>
+        </Modal>
+      )}
+
+      {/* Logout confirm modal */}
+      {modal === "logout" && (
+        <Modal>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>🚪</div>
+            <div style={{ color: tc.text, fontWeight: 700, fontSize: 17, marginBottom: 20 }}>{t.logoutConfirm}</div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setModal(null)}
+                style={{ flex: 1, padding: "12px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.textSub, fontWeight: 700, cursor: "pointer" }}>{t.no}</button>
+              <button onClick={() => { setModal(null); settings.onLogout && settings.onLogout(); }}
+                style={{ flex: 1, padding: "12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 10, color: "#ef4444", fontWeight: 700, cursor: "pointer" }}>{t.yes}</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Notifications */}
+      <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 20 }}>🔔</span>
+          <div style={{ flex: 1, color: tc.text, fontSize: 14, fontWeight: 600 }}>{t.notifications}</div>
+          <div style={{ color: tc.textSub, fontSize: 13, marginLeft: 10 }}>{notifications ? t.active : t.off}</div>
+          <Toggle value={notifications} onToggle={() => setNotifications(v => !v)} />
+        </div>
+      </div>
+
+      {/* Calendar sync */}
+      <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 20 }}>📅</span>
+          <div style={{ flex: 1, color: tc.text, fontSize: 14, fontWeight: 600 }}>{t.calendarBackup}</div>
+          <div style={{ color: tc.textSub, fontSize: 13, marginLeft: 10 }}>{calendarSync ? "Google Calendar" : t.off}</div>
+          <Toggle value={calendarSync} onToggle={() => setCalendarSync(v => !v)} />
+        </div>
+      </div>
+
+      {/* Privacy */}
+      <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10 }}>
+        <div onClick={() => setExpandedSection(expandedSection === "privacy" ? null : "privacy")}
+          style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+          <span style={{ fontSize: 20 }}>🔒</span>
+          <div style={{ flex: 1, color: tc.text, fontSize: 14, fontWeight: 600 }}>{t.privacy}</div>
+          <div style={{ color: tc.textSub, fontSize: 13 }}>{ privacy === "כולם" ? t.everyone : privacy === "חברים בלבד" ? t.friendsOnly : privacy === "אני בלבד" ? t.onlyMe : privacy }</div>
+          <span style={{ color: tc.textMuted, fontSize: 14, transition: "transform 0.2s", display: "inline-block", transform: expandedSection === "privacy" ? "rotate(90deg)" : "none" }}>‹</span>
+        </div>
+        {expandedSection === "privacy" && (
+          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+            {[["כולם",t.everyone],["חברים בלבד",t.friendsOnly],["אני בלבד",t.onlyMe]].map(([val,opt]) => (
+              <button key={val} onClick={() => { setPrivacy(val); setExpandedSection(null); }}
+                style={{ padding: "10px 14px", borderRadius: 10, border: `2px solid ${privacy === val ? "#3b82f6" : tc.border}`, background: privacy === val ? "#1e3a5f" : tc.bg, color: privacy === val ? "#60a5fa" : tc.textSub, fontWeight: 600, fontSize: 13, cursor: "pointer", textAlign: dir === "ltr" ? "left" : "right" }}>
+                {opt}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Theme */}
+      <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10 }}>
+        <div onClick={() => setExpandedSection(expandedSection === "theme" ? null : "theme")}
+          style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+          <span style={{ fontSize: 20 }}>🎨</span>
+          <div style={{ flex: 1, color: tc.text, fontSize: 14, fontWeight: 600 }}>{t.theme}</div>
+          <div style={{ color: tc.textSub, fontSize: 13 }}>{ theme === "כהה" ? t.dark : theme === "בהיר" ? t.light : t.auto }</div>
+          <span style={{ color: tc.textMuted, fontSize: 14, display: "inline-block", transform: expandedSection === "theme" ? "rotate(90deg)" : "none" }}>‹</span>
+        </div>
+        {expandedSection === "theme" && (
+          <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+            {[["כהה",t.dark],["בהיר",t.light],["אוטומטי",t.auto]].map(([val,opt]) => (
+              <button key={val} onClick={() => { setTheme(val); setExpandedSection(null); }}
+                style={{ flex: 1, padding: "10px", borderRadius: 10, border: `2px solid ${theme === val ? "#3b82f6" : tc.border}`, background: theme === val ? "#1e3a5f" : tc.bg, color: theme === val ? "#60a5fa" : tc.textSub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                {opt}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Language */}
+      <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10 }}>
+        <div onClick={() => setExpandedSection(expandedSection === "lang" ? null : "lang")}
+          style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+          <span style={{ fontSize: 20 }}>🌐</span>
+          <div style={{ flex: 1, color: tc.text, fontSize: 14, fontWeight: 600 }}>{t.language}</div>
+          <div style={{ color: tc.textSub, fontSize: 13 }}>{language}</div>
+          <span style={{ color: tc.textMuted, fontSize: 14, display: "inline-block", transform: expandedSection === "lang" ? "rotate(90deg)" : "none" }}>‹</span>
+        </div>
+        {expandedSection === "lang" && (
+          <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+            {["עברית", "English", "العربية"].map(opt => (
+              <button key={opt} onClick={() => { setLanguage(opt); setExpandedSection(null); }}
+                style={{ flex: 1, padding: "10px", borderRadius: 10, border: `2px solid ${language === opt ? "#3b82f6" : tc.border}`, background: language === opt ? "#1e3a5f" : tc.bg, color: language === opt ? "#60a5fa" : tc.textSub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                {opt}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Account management */}
+      <div style={{ marginTop: 24 }}>
+        <div style={{ color: tc.textMuted, fontSize: 11, marginBottom: 10, textAlign: "center" }}>{t.accountMgmt}</div>
+        <button onClick={() => setModal("password")} style={{ width: "100%", padding: "12px", background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, color: tc.textSub, fontWeight: 600, fontSize: 14, cursor: "pointer", marginBottom: 8 }}>
+          {t.changePassword}
+        </button>
+        <button onClick={() => setModal("devices")} style={{ width: "100%", padding: "12px", background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 12, color: tc.textSub, fontWeight: 600, fontSize: 14, cursor: "pointer", marginBottom: 8 }}>
+          {t.connectedDevices}
+        </button>
+        <button onClick={() => setModal("logout")} style={{ width: "100%", padding: "12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 12, color: "#ef4444", fontWeight: 600, fontSize: 14, cursor: "pointer" }}>
+          {t.logout}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── THEME COLORS ────────────────────────────────────────────────────────────
+function getThemeColors(theme) {
+  if (theme === "בהיר") return {
+    bg: "#f1f5f9", bgCard: "#ffffff", bgInput: "#e2e8f0",
+    border: "#cbd5e1", text: "#0f172a", textSub: "#475569",
+    textMuted: "#94a3b8", headerBg: "#f1f5f9ee", sidebarBg: "#ffffff",
+  };
+  if (theme === "אוטומטי") return {
+    bg: "#111827", bgCard: "#1f2937", bgInput: "#374151",
+    border: "#374151", text: "#f9fafb", textSub: "#9ca3af",
+    textMuted: "#6b7280", headerBg: "#111827ee", sidebarBg: "#111827",
+  };
+  return {
+    bg: "#020817", bgCard: "#0f172a", bgInput: "#1e293b",
+    border: "#1e293b", text: "#f1f5f9", textSub: "#64748b",
+    textMuted: "#475569", headerBg: "#020817dd", sidebarBg: "#0a0f1a",
+  };
+}
+
+// ─── APP ─────────────────────────────────────────────────────────────────────
+function App() {
+  const [page, setPage] = useState("home");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [navState, setNavState] = useState({});
+
+  // ── Supabase auth state ──
+  const [authUser, setAuthUser] = useState(null);      // supabase user object
+  const [authLoading, setAuthLoading] = useState(true); // checking session
+
+  useEffect(() => {
+    // Check existing session on mount
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setAuthUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+    // Listen for auth changes (login, logout, token refresh)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Load profile from Supabase
+  const [profileData, setProfileData] = useState(null);
+  useEffect(() => {
+    if (!authUser) { setProfileData(null); return; }
+    supabase.from("profiles").select("*").eq("id", authUser.id).single()
+      .then(({ data }) => { if (data) setProfileData(data); });
+  }, [authUser]);
+
+  const handleLogout = useCallback(async () => {
+    await supabase.auth.signOut();
+    setPage("home");
+  }, []);
+
+  // ── shared user state (from profile or auth) ──
+  const [userName, setUserName] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [userPhoto, setUserPhoto] = useState(null);
+
+  // Sync from profile data when loaded
+  useEffect(() => {
+    if (profileData) {
+      setUserName(profileData.full_name || "");
+      setUserEmail(profileData.email || authUser?.email || "");
+      setUserPhoto(profileData.photo_url || null);
+    } else if (authUser) {
+      setUserEmail(authUser.email || "");
+    }
+  }, [profileData, authUser]);
+
+  const user = {
+    name: userName, email: userEmail, photo: userPhoto,
+    setName: setUserName, setEmail: setUserEmail, setPhoto: setUserPhoto,
+    supabaseId: authUser?.id,
+  };
+
+  // ── shared settings state ──
+  const [notifications, setNotifications] = useState(true);
+  const [calendarSync, setCalendarSync] = useState(true);
+  const [privacy, setPrivacy] = useState("חברים בלבד");
+  const [theme, setTheme] = useState("כהה");
+  const [language, setLanguage] = useState("עברית");
+  const tc = getThemeColors(theme);
+
+  const settings = { notifications, setNotifications, calendarSync, setCalendarSync, privacy, setPrivacy, theme, setTheme, language, setLanguage, onLogout: handleLogout };
+
+  // ── Show auth screen if not logged in ──
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#020817", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ color: "#3b82f6", fontWeight: 800, fontSize: 22, letterSpacing: 2, animation: "pulse 1.5s infinite" }}>MeetUp...</div>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return <AuthScreen onAuth={setAuthUser} />;
+  }
+
+  // navigate to a subpage with data
+  const navigate = (target, data = {}) => {
+    setNavState(data);
+    setPage(target);
+  };
+
+  const goBack = (target = "home") => setPage(target);
+
+  const renderPage = () => {
+    switch (page) {
+      case "home": return <HomePage setPage={setPage} user={user} language={language} tc={tc} />;
+      case "create": return <CreateMeetingPage language={language} tc={tc} />;
+      case "meetings": return <MeetingsPage language={language} tc={tc} />;
+      case "friends": return <FriendsPage navigate={navigate} language={language} tc={tc} />;
+      case "stats": return <StatsPage language={language} tc={tc} />;
+      case "business": return <BusinessPage navigate={navigate} language={language} tc={tc} />;
+      case "settings": return <SettingsPage settings={settings} tc={tc} />;
+      case "profile": return <ProfilePage user={user} language={language} tc={tc} />;
+      case "friendProfile": return (
+        <FriendProfilePage
+          friend={navState.friend}
+          onBack={() => goBack("friends")}
+          onChat={() => navigate("friendChat", { friend: navState.friend })}
+        />
+      );
+      case "friendChat": return (
+        <ChatView
+          name={navState.friend?.name}
+          initial={navState.friend?.initial}
+          messages={FRIEND_CHAT_MESSAGES[navState.friend?.id] || []}
+          onBack={() => navigate("friendProfile", { friend: navState.friend })}
+        />
+      );
+      case "businessProfile": return (
+        <BusinessProfilePage
+          business={navState.business}
+          onBack={() => goBack("business")}
+          onChat={() => navigate("businessChat", { business: navState.business })}
+          onBook={() => navigate("bookAppointment", { business: navState.business })}
+        />
+      );
+      case "businessChat": return (
+        <ChatView
+          name={navState.business?.name}
+          initial={navState.business?.initial}
+          gradient="linear-gradient(135deg,#1e40af,#7c3aed)"
+          messages={BUSINESS_CHAT_MESSAGES[navState.business?.id] || []}
+          onBack={() => navigate("businessProfile", { business: navState.business })}
+        />
+      );
+      case "bookAppointment": return (
+        <AppointmentBooking
+          business={navState.business}
+          onBack={() => navigate("businessProfile", { business: navState.business })}
+        />
+      );
+      default: return <HomePage setPage={setPage} user={user} language={language} tc={tc} />;
+    }
+  };
+
+  const mainPages = ["home", "create", "meetings", "friends", "stats", "business", "settings", "profile"];
+  const currentMainPage = mainPages.includes(page) ? page : null;
+
+  return (
+    <div style={{ minHeight: "100vh", background: tc.bg, fontFamily: "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif", transition: "background 0.3s" }}>
+      <Sidebar page={currentMainPage} setPage={setPage} sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen} user={user} language={language} tc={tc} />
+      <header style={{ position: "sticky", top: 0, zIndex: 30, background: tc.headerBg, backdropFilter: "blur(14px)", borderBottom: `1px solid ${tc.border}`, padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", direction: "rtl" }}>
+        <div style={{ color: "#3b82f6", fontWeight: 800, fontSize: 20, letterSpacing: 1 }}>MeetUp</div>
+        <button onClick={() => setSidebarOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", gap: 5, padding: 4 }}>
+          {[0, 1, 2].map(i => <div key={i} style={{ width: 22, height: 2, background: "#94a3b8", borderRadius: 2 }} />)}
+        </button>
+      </header>
+      <main style={{ padding: "24px 20px 48px", maxWidth: 600, margin: "0 auto" }}>
+        {renderPage()}
+      </main>
+    </div>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
