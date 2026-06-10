@@ -1439,7 +1439,7 @@ function FriendsPage({ navigate, language, tc }) {
 function StatsPage({ language, tc }) {
   const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
   const dir = language === "English" ? "ltr" : "rtl";
-  const [tab, setTab] = React.useState("attendance");
+  const [tab, setTab] = useState("attendance");
 
   const tabs = [
     { id: "attendance", label: "🏆 נוכחות" },
