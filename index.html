@@ -4,22 +4,22 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MeetUp</title>
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #020817; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-    input, button, textarea { font-family: inherit; }
+    input, button, textarea, select { font-family: inherit; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useCallback } = React;
 
 // ─── SUPABASE REST CLIENT (no external library) ──────────────────────────────
 const SUPABASE_URL = "https://mqtvptumpsbxyzeuvvjn.supabase.co";
@@ -166,36 +166,28 @@ function AuthScreen({ onAuth }) {
     setError(""); setLoading(true);
     if (!fullName.trim()) { setError("נא להכניס שם מלא"); setLoading(false); return; }
     if (password.length < 6) { setError("הסיסמה חייבת להכיל לפחות 6 תווים"); setLoading(false); return; }
-    try {
-      const { data, error: err } = await supabase.auth.signUp({ email, password });
-      console.log("signUp response:", JSON.stringify({ data, error: err }));
-      if (err) {
-        const msg = err.message || "";
-        if (msg.toLowerCase().includes("already") || msg.toLowerCase().includes("registered")) {
-          setError("אימייל זה כבר רשום — נסה להתחבר");
-          setMode("login");
-        } else {
-          setError("err: " + msg);
-        }
-        setLoading(false); return;
-      }
-      // Supabase bug: when email already exists it returns a user with empty identities array
-      if (!data?.user?.id || (Array.isArray(data.user.identities) && data.user.identities.length === 0)) {
+    const { data, error: err } = await supabase.auth.signUp({ email, password });
+    if (err) {
+      const msg = err.message || "";
+      if (msg.toLowerCase().includes("already") || msg.toLowerCase().includes("registered")) {
         setError("אימייל זה כבר רשום — נסה להתחבר");
         setMode("login");
-        setLoading(false); return;
+      } else {
+        setError(msg || "שגיאה בהרשמה");
       }
-      // Save profile
-      await supabase.from("profiles").upsert({ id: data.user.id, full_name: fullName.trim(), email });
-      // Auto login
-      const { data: loginData, error: loginErr } = await supabase.auth.signInWithPassword({ email, password, rememberMe });
-      setLoading(false);
-      if (loginErr) { setError("נרשמת בהצלחה! כעת התחבר."); setMode("login"); return; }
-      onAuth(loginData.user);
-    } catch (e) {
-      setLoading(false);
-      setError("catch: " + (e?.message || String(e)));
+      setLoading(false); return;
     }
+    // Supabase sometimes returns a fake user without access_token when email already exists
+    if (!data?.user?.id) {
+      setError("אימייל זה כבר רשום — נסה להתחבר");
+      setMode("login");
+      setLoading(false); return;
+    }
+    await supabase.from("profiles").upsert({ id: data.user.id, full_name: fullName.trim(), email });
+    const { data: loginData, error: loginErr } = await supabase.auth.signInWithPassword({ email, password, rememberMe });
+    setLoading(false);
+    if (loginErr) { setError("נרשמת! כעת התחבר."); setMode("login"); return; }
+    onAuth(loginData.user);
   };
 
   const handleForgot = async () => {
@@ -1145,29 +1137,240 @@ function MeetingsPage({ language, tc }) {
 function FriendsPage({ navigate, language, tc }) {
   const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
   const dir = language === "English" ? "ltr" : "rtl";
+  const [tab, setTab] = useState("list"); // "list" | "add" | "suggestions"
+  const [friendCode, setFriendCode] = useState("");
+  const [codeResult, setCodeResult] = useState(null); // null | "sent" | "notfound"
+  const [contactsStatus, setContactsStatus] = useState(null); // null | "loading" | "done" | "denied"
+  const [contactMatches, setContactMatches] = useState([]);
+  const [pendingRequests] = useState([
+    { id: 101, name: "רועי בן דוד", initial: "ר", mutualMeetings: 2, sports: ["כדורגל"] },
+  ]);
+
+  // Simulate suggestions based on shared interests + location
+  const SUGGESTIONS = [
+    { id: 201, name: "נועה קץ", initial: "נ", distance: "0.8 ק״מ", sports: ["בית קפה", "טניס"], mutual: 1 },
+    { id: 202, name: "יונתן שפירא", initial: "י", distance: "1.2 ק״מ", sports: ["כדורגל", "חדר כושר"], mutual: 3 },
+    { id: 203, name: "מאיה לוינסון", initial: "מ", distance: "2.1 ק״מ", sports: ["מסעדה", "ערב משחקים"], mutual: 0 },
+    { id: 204, name: "אורי פרידמן", initial: "א", distance: "3.5 ק״מ", sports: ["כדורסל", "פינג פונג"], mutual: 2 },
+  ];
+
+  const [sentRequests, setSentRequests] = useState([]);
+  const [filterSuggestions, setFilterSuggestions] = useState("הכל"); // "הכל" | "קרבה" | "נושאים"
+
+  const handleSendCode = () => {
+    if (!friendCode.trim()) return;
+    // Simulate: if code is 6 chars → sent, else not found
+    if (friendCode.trim().length === 6) {
+      setCodeResult("sent");
+    } else {
+      setCodeResult("notfound");
+    }
+  };
+
+  const handleRequestContacts = async () => {
+    setContactsStatus("loading");
+    try {
+      const contacts = await navigator.contacts?.select(["name", "tel"], { multiple: true });
+      if (contacts && contacts.length > 0) {
+        // Simulate finding matches
+        setTimeout(() => {
+          setContactMatches([
+            { id: 301, name: contacts[0]?.name?.[0] || "חבר מהקשרים", initial: (contacts[0]?.name?.[0]?.[0]) || "ח", phone: contacts[0]?.tel?.[0] || "" },
+          ]);
+          setContactsStatus("done");
+        }, 800);
+      } else {
+        setContactsStatus("done");
+        setContactMatches([]);
+      }
+    } catch {
+      // Contacts API not supported or denied
+      setContactsStatus("denied");
+    }
+  };
+
+  const filteredSuggestions = filterSuggestions === "קרבה"
+    ? [...SUGGESTIONS].sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance))
+    : filterSuggestions === "נושאים"
+    ? [...SUGGESTIONS].sort((a, b) => b.mutual - a.mutual)
+    : SUGGESTIONS;
+
   return (
     <div style={{ direction: dir }}>
-      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 18 }}>{t.friends}</h2>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {FRIENDS.map(f => {
-          const rel = Math.round(((f.meetings - f.cancelled) / f.meetings) * 100);
-          return (
-            <button key={f.id} onClick={() => navigate("friendProfile", { friend: f })}
-              style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", textAlign: "right", width: "100%" }}>
-              <Avatar initial={f.initial} size={44} />
-              <div style={{ flex: 1 }}>
-                <div style={{ color: tc.text, fontWeight: 700, fontSize: 15 }}>{f.name}</div>
-                <div style={{ color: tc.textSub, fontSize: 12, marginTop: 2 }}>{f.mutualMeetings} {t.mutualMeetings}</div>
-              </div>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ color: rel >= 80 ? "#22c55e" : rel >= 60 ? "#f59e0b" : "#ef4444", fontWeight: 800, fontSize: 16 }}>{rel}%</div>
-                <div style={{ color: tc.textMuted, fontSize: 10 }}>{t.attendance}</div>
-              </div>
-              <span style={{ color: tc.textMuted, fontSize: 18 }}>‹</span>
-            </button>
-          );
-        })}
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 16 }}>{t.friends}</h2>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 0, marginBottom: 20, background: tc.bgInput, borderRadius: 12, padding: 4 }}>
+        {[["list", "👥 חברים"], ["add", "➕ הוסף"], ["suggestions", "💡 הצעות"]].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)}
+            style={{ flex: 1, padding: "9px 4px", borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 13,
+              background: tab === id ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : "transparent",
+              color: tab === id ? "#fff" : tc.textSub, transition: "all 0.2s" }}>
+            {label}
+          </button>
+        ))}
       </div>
+
+      {/* TAB: Friends List */}
+      {tab === "list" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {/* Pending incoming requests */}
+          {pendingRequests.length > 0 && (
+            <div style={{ background: "#1e3a5f", border: "1px solid #3b82f640", borderRadius: 14, padding: "14px 16px", marginBottom: 4 }}>
+              <div style={{ color: "#60a5fa", fontWeight: 700, fontSize: 13, marginBottom: 10 }}>📨 בקשות חברות ממתינות</div>
+              {pendingRequests.map(req => (
+                <div key={req.id} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <Avatar initial={req.initial} size={40} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: tc.text, fontWeight: 700, fontSize: 14 }}>{req.name}</div>
+                    <div style={{ color: tc.textSub, fontSize: 12 }}>{req.mutualMeetings} פגישות משותפות</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button style={{ padding: "6px 12px", background: "#14532d", border: "none", borderRadius: 8, color: "#22c55e", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✓ אשר</button>
+                    <button style={{ padding: "6px 10px", background: "#450a0a", border: "none", borderRadius: 8, color: "#ef4444", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {FRIENDS.map(f => {
+            const rel = Math.round(((f.meetings - f.cancelled) / f.meetings) * 100);
+            return (
+              <button key={f.id} onClick={() => navigate("friendProfile", { friend: f })}
+                style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", textAlign: "right", width: "100%" }}>
+                <Avatar initial={f.initial} size={44} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: tc.text, fontWeight: 700, fontSize: 15 }}>{f.name}</div>
+                  <div style={{ color: tc.textSub, fontSize: 12, marginTop: 2 }}>{f.mutualMeetings} {t.mutualMeetings}</div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: rel >= 80 ? "#22c55e" : rel >= 60 ? "#f59e0b" : "#ef4444", fontWeight: 800, fontSize: 16 }}>{rel}%</div>
+                  <div style={{ color: tc.textMuted, fontSize: 10 }}>{t.attendance}</div>
+                </div>
+                <span style={{ color: tc.textMuted, fontSize: 18 }}>‹</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* TAB: Add Friend */}
+      {tab === "add" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* My own code */}
+          <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "18px 16px", textAlign: "center" }}>
+            <div style={{ color: tc.textSub, fontSize: 12, marginBottom: 8 }}>הקוד שלך לשיתוף</div>
+            <div style={{ color: "#60a5fa", fontWeight: 900, fontSize: 28, letterSpacing: 6, fontFamily: "monospace", marginBottom: 10 }}>AB3K9Z</div>
+            <button onClick={() => { try { navigator.share?.({ text: "הצטרף אליי ב-MeetUp! הקוד שלי: AB3K9Z" }); } catch {} }}
+              style={{ padding: "9px 22px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 10, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              📤 שתף קוד
+            </button>
+          </div>
+
+          {/* Enter friend code */}
+          <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "16px" }}>
+            <div style={{ color: tc.text, fontWeight: 700, fontSize: 14, marginBottom: 10 }}>הכנס קוד חבר</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={friendCode} onChange={e => { setFriendCode(e.target.value.toUpperCase()); setCodeResult(null); }}
+                placeholder="XXXXXX" maxLength={6}
+                style={{ flex: 1, padding: "11px 14px", background: tc.bgInput, border: `1px solid ${codeResult === "notfound" ? "#ef4444" : codeResult === "sent" ? "#22c55e" : tc.border}`, borderRadius: 10, color: tc.text, fontSize: 16, fontFamily: "monospace", letterSpacing: 4, textAlign: "center", direction: "ltr" }} />
+              <button onClick={handleSendCode} disabled={friendCode.length < 6}
+                style={{ padding: "11px 16px", background: friendCode.length >= 6 ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : tc.bgInput, border: "none", borderRadius: 10, color: friendCode.length >= 6 ? "#fff" : tc.textSub, fontWeight: 700, fontSize: 14, cursor: friendCode.length >= 6 ? "pointer" : "not-allowed" }}>
+                שלח
+              </button>
+            </div>
+            {codeResult === "sent" && (
+              <div style={{ marginTop: 10, color: "#22c55e", fontSize: 13, fontWeight: 600 }}>✅ בקשת חברות נשלחה!</div>
+            )}
+            {codeResult === "notfound" && (
+              <div style={{ marginTop: 10, color: "#ef4444", fontSize: 13 }}>⚠️ קוד לא נמצא — בדוק שוב</div>
+            )}
+          </div>
+
+          {/* Contacts */}
+          <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "16px" }}>
+            <div style={{ color: tc.text, fontWeight: 700, fontSize: 14, marginBottom: 6 }}>📱 ייבא מאנשי קשר</div>
+            <div style={{ color: tc.textSub, fontSize: 12, marginBottom: 12 }}>מצא חברים שכבר משתמשים ב-MeetUp</div>
+            {contactsStatus === null && (
+              <button onClick={handleRequestContacts}
+                style={{ width: "100%", padding: "11px", background: tc.bgInput, border: `1px solid ${tc.border}`, borderRadius: 10, color: tc.text, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>
+                🔍 סרוק אנשי קשר
+              </button>
+            )}
+            {contactsStatus === "loading" && (
+              <div style={{ color: tc.textSub, fontSize: 13, textAlign: "center", padding: "10px 0" }}>סורק...</div>
+            )}
+            {contactsStatus === "denied" && (
+              <div style={{ color: "#f59e0b", fontSize: 13 }}>⚠️ הגישה לאנשי קשר נדחתה. ניתן לשנות בהגדרות הטלפון.</div>
+            )}
+            {contactsStatus === "done" && contactMatches.length === 0 && (
+              <div style={{ color: tc.textSub, fontSize: 13, textAlign: "center", padding: "10px 0" }}>לא נמצאו חברים מאנשי הקשר שלך באפליקציה</div>
+            )}
+            {contactsStatus === "done" && contactMatches.map(c => (
+              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+                <Avatar initial={c.initial} size={40} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: tc.text, fontWeight: 700, fontSize: 14 }}>{c.name}</div>
+                  {c.phone && <div style={{ color: tc.textSub, fontSize: 12 }}>{c.phone}</div>}
+                </div>
+                <button style={{ padding: "7px 14px", background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 8, color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>הוסף</button>
+              </div>
+            ))}
+          </div>
+
+          {/* Sent requests */}
+          {sentRequests.length > 0 && (
+            <div style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px" }}>
+              <div style={{ color: tc.textSub, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>📤 בקשות שנשלחו</div>
+              {sentRequests.map((r, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
+                  <span style={{ color: tc.text, fontSize: 14 }}>קוד: {r.code}</span>
+                  <span style={{ color: "#f59e0b", fontSize: 12 }}>ממתין...</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB: Suggestions */}
+      {tab === "suggestions" && (
+        <div>
+          {/* Filter */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            {["הכל", "קרבה", "נושאים"].map(f => (
+              <button key={f} onClick={() => setFilterSuggestions(f)}
+                style={{ flex: 1, padding: "8px", borderRadius: 10, border: `2px solid ${filterSuggestions === f ? "#3b82f6" : tc.border}`, background: filterSuggestions === f ? "#1e3a5f" : tc.bgCard, color: filterSuggestions === f ? "#60a5fa" : tc.textSub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                {f === "קרבה" ? "📍 קרבה" : f === "נושאים" ? "🎯 נושאים" : "🔀 הכל"}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {filteredSuggestions.map(s => (
+              <div key={s.id} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                <Avatar initial={s.initial} size={44} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: tc.text, fontWeight: 700, fontSize: 15 }}>{s.name}</div>
+                  <div style={{ color: tc.textSub, fontSize: 12, marginTop: 2 }}>
+                    📍 {s.distance}
+                    {s.mutual > 0 && <span style={{ marginRight: 8 }}>• {s.mutual} חברים משותפים</span>}
+                  </div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+                    {s.sports.map(sp => (
+                      <span key={sp} style={{ padding: "2px 8px", background: "#1e3a5f", borderRadius: 10, color: "#60a5fa", fontSize: 11, fontWeight: 600 }}>{sp}</span>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSentRequests(prev => prev.some(r => r.id === s.id) ? prev : [...prev, { id: s.id }])}
+                  style={{ padding: "8px 14px", background: sentRequests.some(r => r.id === s.id) ? "#14532d" : "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 10, color: sentRequests.some(r => r.id === s.id) ? "#22c55e" : "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 }}>
+                  {sentRequests.some(r => r.id === s.id) ? "✓ נשלח" : "הוסף"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1428,7 +1631,7 @@ function HomePage({ setPage, user, language, tc }) {
     <div style={{ direction: dir }}>
       <div style={{ marginBottom: 22 }}>
         <div style={{ color: tc.textSub, fontSize: 14 }}>{t.hello}</div>
-        <div style={{ color: tc.text, fontWeight: 800, fontSize: 26 }}>{user?.name || "אלון ישראלי"} 👋</div>
+        <div style={{ color: tc.text, fontWeight: 800, fontSize: 26 }}>{user?.name || "שלום"} 👋</div>
       </div>
       <button onClick={() => setPage("create")} style={{ width: "100%", padding: "18px", marginBottom: 24, background: "linear-gradient(135deg,#1e3a8a,#7c3aed)", border: "1px solid #3b82f640", borderRadius: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 14, boxShadow: "0 4px 24px rgba(59,130,246,0.15)" }}>
         <div style={{ width: 48, height: 48, borderRadius: 12, background: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>➕</div>
