@@ -423,11 +423,11 @@ const INVITED_MEETINGS = [
 ];
 
 const STATS = [
-  { friend: "שירה מזרחי", initial: "ש", attended: 12, total: 12, cancelled: 0 },
-  { friend: "דני אברהם", initial: "ד", attended: 10, total: 12, cancelled: 2 },
-  { friend: "יוסי כהן", initial: "י", attended: 9, total: 12, cancelled: 3 },
-  { friend: "מיכל לוי", initial: "מ", attended: 7, total: 12, cancelled: 5 },
-  { friend: "עמית גולן", initial: "ע", attended: 5, total: 12, cancelled: 7 },
+  { friend: "שירה מזרחי", initial: "ש", attended: 12, total: 12, cancelled: 0, initiated: 8, newMeetings: 5 },
+  { friend: "דני אברהם", initial: "ד", attended: 10, total: 12, cancelled: 2, initiated: 6, newMeetings: 7 },
+  { friend: "יוסי כהן", initial: "י", attended: 9, total: 12, cancelled: 3, initiated: 4, newMeetings: 3 },
+  { friend: "מיכל לוי", initial: "מ", attended: 7, total: 12, cancelled: 5, initiated: 3, newMeetings: 6 },
+  { friend: "עמית גולן", initial: "ע", attended: 5, total: 12, cancelled: 7, initiated: 2, newMeetings: 2 },
 ];
 
 const BUSINESSES = [
@@ -1263,7 +1263,7 @@ function FriendsPage({ navigate, language, tc }) {
 
       {/* Tabs */}
       <div style={{ display: "flex", gap: 0, marginBottom: 20, background: tc.bgInput, borderRadius: 12, padding: 4 }}>
-        {[["list", "👥 חברים"], ["add", "➕ הוסף"]].map(([id, label]) => (
+        {[["list", "👥 חברים"], ["add", "➕ הוסף חברים"]].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             style={{ flex: 1, padding: "9px 4px", borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 13,
               background: tab === id ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : "transparent",
@@ -1316,7 +1316,7 @@ function FriendsPage({ navigate, language, tc }) {
         </div>
       )}
 
-      {/* TAB: Add Friend */}
+      {/* TAB: Add Friends (includes search by code/contacts + suggestions) */}
       {tab === "add" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {/* My own code */}
@@ -1392,80 +1392,120 @@ function FriendsPage({ navigate, language, tc }) {
               ))}
             </div>
           )}
-        </div>
-      )}
 
-      {/* Suggestions (inside add tab) */}
-      {tab === "add" && (
-        <div>
-          {/* Filter */}
-          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-            {["הכל", "קרבה", "נושאים"].map(f => (
-              <button key={f} onClick={() => setFilterSuggestions(f)}
-                style={{ flex: 1, padding: "8px", borderRadius: 10, border: `2px solid ${filterSuggestions === f ? "#3b82f6" : tc.border}`, background: filterSuggestions === f ? "#1e3a5f" : tc.bgCard, color: filterSuggestions === f ? "#60a5fa" : tc.textSub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
-                {f === "קרבה" ? "📍 קרבה" : f === "נושאים" ? "🎯 נושאים" : "🔀 הכל"}
-              </button>
-            ))}
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {filteredSuggestions.map(s => (
-              <div key={s.id} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
-                <Avatar initial={s.initial} size={44} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ color: tc.text, fontWeight: 700, fontSize: 15 }}>{s.name}</div>
-                  <div style={{ color: tc.textSub, fontSize: 12, marginTop: 2 }}>
-                    📍 {s.distance}
-                    {s.mutual > 0 && <span style={{ marginRight: 8 }}>• {s.mutual} חברים משותפים</span>}
-                  </div>
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
-                    {s.sports.map(sp => (
-                      <span key={sp} style={{ padding: "2px 8px", background: "#1e3a5f", borderRadius: 10, color: "#60a5fa", fontSize: 11, fontWeight: 600 }}>{sp}</span>
-                    ))}
-                  </div>
-                </div>
-                <button
-                  onClick={() => setSentRequests(prev => prev.some(r => r.id === s.id) ? prev : [...prev, { id: s.id }])}
-                  style={{ padding: "8px 14px", background: sentRequests.some(r => r.id === s.id) ? "#14532d" : "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 10, color: sentRequests.some(r => r.id === s.id) ? "#22c55e" : "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 }}>
-                  {sentRequests.some(r => r.id === s.id) ? "✓ נשלח" : "הוסף"}
+          {/* Suggestions */}
+          <div style={{ marginTop: 4 }}>
+            <div style={{ color: tc.text, fontWeight: 700, fontSize: 15, marginBottom: 12 }}>💡 אנשים שאולי תכיר</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              {["הכל", "קרבה", "נושאים"].map(f => (
+                <button key={f} onClick={() => setFilterSuggestions(f)}
+                  style={{ flex: 1, padding: "8px", borderRadius: 10, border: `2px solid ${filterSuggestions === f ? "#3b82f6" : tc.border}`, background: filterSuggestions === f ? "#1e3a5f" : tc.bgCard, color: filterSuggestions === f ? "#60a5fa" : tc.textSub, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                  {f === "קרבה" ? "📍 קרבה" : f === "נושאים" ? "🎯 נושאים" : "🔀 הכל"}
                 </button>
-              </div>
-            ))}
+              ))}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {filteredSuggestions.map(s => (
+                <div key={s.id} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+                  <Avatar initial={s.initial} size={44} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: tc.text, fontWeight: 700, fontSize: 15 }}>{s.name}</div>
+                    <div style={{ color: tc.textSub, fontSize: 12, marginTop: 2 }}>
+                      📍 {s.distance}
+                      {s.mutual > 0 && <span style={{ marginRight: 8 }}>• {s.mutual} חברים משותפים</span>}
+                    </div>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+                      {s.sports.map(sp => (
+                        <span key={sp} style={{ padding: "2px 8px", background: "#1e3a5f", borderRadius: 10, color: "#60a5fa", fontSize: 11, fontWeight: 600 }}>{sp}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setSentRequests(prev => prev.some(r => r.id === s.id) ? prev : [...prev, { id: s.id }])}
+                    style={{ padding: "8px 14px", background: sentRequests.some(r => r.id === s.id) ? "#14532d" : "linear-gradient(135deg,#3b82f6,#8b5cf6)", border: "none", borderRadius: 10, color: sentRequests.some(r => r.id === s.id) ? "#22c55e" : "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 }}>
+                    {sentRequests.some(r => r.id === s.id) ? "✓ נשלח" : "הוסף"}
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
     </div>
   );
-}
+}}
 
 // ─── STATS ───────────────────────────────────────────────────────────────────
 function StatsPage({ language, tc }) {
   const t = TRANSLATIONS[language] || TRANSLATIONS["עברית"];
   const dir = language === "English" ? "ltr" : "rtl";
+  const [tab, setTab] = React.useState("attendance");
+
+  const tabs = [
+    { id: "attendance", label: "🏆 נוכחות" },
+    { id: "initiated", label: "📅 יוזם פגישות" },
+    { id: "newMeetings", label: "🤝 הכרויות" },
+  ];
+
+  const sorted = [...STATS].sort((a, b) => b[tab] - a[tab]);
+
+  const medalColor = i => i === 0 ? "#f59e0b" : i === 1 ? "#94a3b8" : i === 2 ? "#cd7f32" : tc.textMuted;
+  const medal = i => i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i+1}`;
+
+  const barValue = s => tab === "attendance"
+    ? Math.round((s.attended / s.total) * 100)
+    : tab === "initiated"
+    ? Math.round((s.initiated / 10) * 100)
+    : Math.round((s.newMeetings / 10) * 100);
+
+  const barLabel = s => tab === "attendance"
+    ? `${s.attended}/${s.total} פגישות • ${s.cancelled} ביטולים`
+    : tab === "initiated"
+    ? `${s.initiated} פגישות ביזם`
+    : `${s.newMeetings} הכרויות חדשות`;
+
   return (
     <div style={{ direction: dir }}>
-      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 18 }}>{t.statsTitle}</h2>
+      <h2 style={{ color: tc.text, fontWeight: 800, fontSize: 22, marginBottom: 6 }}>{t.statsTitle}</h2>
       <p style={{ color: tc.textSub, fontSize: 13, marginBottom: 18 }}>{t.statsSubtitle}</p>
-      {STATS.map((s, i) => (
-        <div key={i} style={{ background: tc.bgCard, border: `1px solid ${tc.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-            <span style={{ fontSize: 18, fontWeight: 800, color: i === 0 ? "#f59e0b" : i === 1 ? "#94a3b8" : "#8b5cf640", minWidth: 24 }}>#{i + 1}</span>
-            <Avatar initial={s.initial} size={36} />
-            <div style={{ flex: 1 }}>
-              <div style={{ color: tc.text, fontWeight: 700, fontSize: 14 }}>{s.friend}</div>
-              <div style={{ color: tc.textSub, fontSize: 12 }}>{s.attended}/{s.total} • {s.cancelled} ביטולים</div>
+
+      {/* Tab selector */}
+      <div style={{ display: "flex", gap: 0, marginBottom: 20, background: tc.bgInput, borderRadius: 12, padding: 4 }}>
+        {tabs.map(({ id, label }) => (
+          <button key={id} onClick={() => setTab(id)}
+            style={{ flex: 1, padding: "9px 4px", borderRadius: 9, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 12,
+              background: tab === id ? "linear-gradient(135deg,#3b82f6,#8b5cf6)" : "transparent",
+              color: tab === id ? "#fff" : tc.textSub, transition: "all 0.2s" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Leaderboard */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {sorted.map((s, i) => (
+          <div key={s.friend} style={{ background: tc.bgCard, border: `1px solid ${i === 0 ? "#f59e0b40" : tc.border}`, borderRadius: 14, padding: "14px 16px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+              <span style={{ fontSize: i < 3 ? 22 : 14, fontWeight: 800, color: medalColor(i), minWidth: 28, textAlign: "center" }}>{medal(i)}</span>
+              <Avatar initial={s.initial} size={36} />
+              <div style={{ flex: 1 }}>
+                <div style={{ color: tc.text, fontWeight: 700, fontSize: 14 }}>{s.friend}</div>
+                <div style={{ color: tc.textSub, fontSize: 12 }}>{barLabel(s)}</div>
+              </div>
+              <div style={{ color: tab === "attendance" && s.cancelled === 0 ? "#22c55e" : tc.textSub, fontWeight: 800, fontSize: 18 }}>
+                {tab === "attendance" ? `${Math.round((s.attended / s.total) * 100)}%` : tab === "initiated" ? s.initiated : s.newMeetings}
+              </div>
+            </div>
+            <div style={{ background: tc.bgInput, borderRadius: 6, height: 8, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${barValue(s)}%`, background: i === 0 ? "linear-gradient(90deg,#f59e0b,#f97316)" : "linear-gradient(90deg,#3b82f6,#8b5cf6)", borderRadius: 6, transition: "width 0.4s" }} />
             </div>
           </div>
-          <div style={{ background: tc.bgInput, borderRadius: 6, height: 8, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${(s.attended / s.total) * 100}%`, background: "linear-gradient(90deg,#3b82f6,#22c55e)", borderRadius: 6 }} />
-          </div>
-          <div style={{ color: tc.textSub, fontSize: 11, marginTop: 4, textAlign: "left" }}>{Math.round((s.attended / s.total) * 100)}%</div>
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
 
-// ─── BUSINESS PAGE ────────────────────────────────────────────────────────────
 function BusinessPage({ navigate }) {
   const [subTab, setSubTab] = useState("search");
   const [query, setQuery] = useState("");
